@@ -348,7 +348,7 @@ plot_PCA <- function(transformed_data,
   return(plot)
 }
 
-################# DESeq2 DIFFERENTIAL GENE EXPRESSION ANALYSIS #################
+##### DESeq2  #######
 
 plot_diff_count <- function(diff_genes_list_table, plot_coding=T, fontsize=16){
   
@@ -490,7 +490,7 @@ plotDE <- function( res, main = "" ){
 }
 
 
-#Enrichment Visualization
+####Enrichment Visualization####
 
 plot_GO <- function(enrichedGO_results, show=10, filename="", mutate=F, title="") {
   

@@ -1,44 +1,40 @@
 # Single Cell/Spatial Utility functions
 # Author: Nixon Raj
 
+
+####SPATA utils####  
+
+convert2Seurat <- function (spata_obj, image_path){
+  # convert a Spata object into seurat
+  # using transformSpataToSeurat() doesnt add image to the seurat object
+  # so created this function to manually add image and create a seurat obj
+  
+  seurat_obj <- SPATA2::transformSpataToSeurat(spata_obj, NormalizeData=F, 
+                                               FindVariableFeatures=F, SCTransform = F,
+                                               ScaleData=F, RunPCA=F, FindNeighbors=F, 
+                                               FindClusters=F, RunTSNE = F,
+                                               RunUMAP = F)
+  seurat_obj <- base::tryCatch({
+    lowres <- Read10X_Image(image_path, image.name = "tissue_lowres_image.png")
+    seurat_obj@images$slice1 = lowres
+    seurat_obj@images$slice1@assay = "Spatial"
+    seurat_obj@images$slice1@key = "slice1_"
+    base::warning("The SpatialImage is manually added to the Seurat Object")
+    seurat_obj
+  }, error = function(error) {
+    base::warning("Error in adding image slice manually")
+  })
+  return(seurat_obj)
+  
+}
+
+
 get_all_histology_subset <- function(spata2_obj){
   "Create a subset based on barcodes present in organ segmentation defined, returns all segmentations except unnamed"
   fdata <- spata2_obj@fdata[[spata2_obj@samples]]
   segment_barcodes <- fdata[fdata$histology != "unnamed",]$barcodes
   subset_obj <- subsetByBarcodes(spata2_obj, barcodes = segment_barcodes, verbose = T)
   return(subset_obj)
-}
-
-check_save_dea_data <- function(markers, path, filename){
-  
-  if (file.exists(filename)) {
-    #Delete file if it exists
-    file.remove(filename)
-    write.table(markers, file = file.path(path,filename),
-                sep = ",",
-                append = F,
-                col.names=T, 
-                row.names = F)
-  }else{
-    write.table(markers, file = file.path(path,filename),
-                sep = ",",
-                append = F,
-                col.names=T, 
-                row.names = F)
-  }
-}
-
-
-isString <- function(input) {
-  is.character(input) & length(input) == 1
-}
-
-toCommaString <- function(genelist){
-  # converting vector
-  vec2 <- shQuote(genelist, type = "cmd")
-  # combining elements using , 
-  comma_vec2 <- paste(vec2, collapse = ", ")
-  return(cat(comma_vec2))
 }
 
 get_organ_subset <- function(spata2_obj, histology_name){
@@ -79,6 +75,13 @@ merge_histology <- function(spata2_obj, histology_names_to_merge, new_histology_
   paste("After Merging:")
   print(unique(nw_fdata$histology))
   return(spata2_obj)
+}
+
+get_organ_barcodes <- function(obj, histology_name){
+  # Get barcode of the given histology type
+  obj <- get_organ_subset(obj, histology_name = histology_name)
+  obj_barcodes <- obj@fdata[[obj@samples]]$barcodes
+  return(obj_barcodes)
 }
 
 calc_helper <- function(object,genes){
@@ -122,6 +125,69 @@ remove_HB_genes <- function(obj){
   return(obj)
 }
 
+
+####Seurat Visium####
+
+plot_average_exp_HeatMap <- function(obj){
+  
+  n = length(unique(obj$seurat_clusters))
+  datalist = vector("list", length = n)
+  for (i in 1:n){
+    exp_data <- as.data.frame(get_highly_exp_genes(obj, cluster=i-1, genenames = F))
+    exp_data$gene <- rownames(exp_data)
+    exp_data <- exp_data %>% gather(key='sample', value='value', -gene)
+    datalist[[i]] <- exp_data
+  }
+  
+  alldata = do.call(rbind, datalist)
+  ggplot(alldata, aes(sample, gene)) + geom_tile(aes(fill=value))
+}  
+
+library(viridis)
+plotHeatMap <- function(df){
+  og <- df
+  df$gene <- rownames(df)
+  df <- df %>% gather(key='cluster', value='value', -gene)
+  ggplot(df, aes(cluster, gene, fill=value)) + 
+    geom_tile() + 
+    scale_fill_viridis()
+}
+
+getNwriteDEG_df <- function(markers, path=NULL, file_name=NULL, pcut=1e-2, FCcut=1, 
+                            rankbyFC=F,
+                            rankbyPval=F,
+                            rankbyAdjPval=F, 
+                            write=F){
+  #:markers: results of FindMarkers
+  #:path: relative path to save
+  #:filename: filename to save
+  
+  ge <- markers %>%
+    as.data.frame() %>%
+    filter(p_val < pcut & abs(avg_log2FC) > FCcut)
+  
+  if (rankbyFC){
+    ge <- arrange(ge, desc(avg_log2FC))
+  }
+  
+  if (rankbyPval){
+    ge <- arrange(ge, p_val)
+  }
+  
+  if (rankbyAdjPval){
+    ge <- arrange(ge, p_val_adj)
+  }
+  
+  if (!is.null(path) & !is.null(file_name)){
+    write.table(ge, 
+                file = file.path(merged_save_path, paste0(file_name, ".csv")),
+                sep = ",", 
+                row.names = F, 
+                quote = FALSE)
+  }
+  return(ge)
+}
+
 # Function to remove unwanted genes from a Seurat object
 remove_unwanted_genes <- function(obj) {
   # Define lists of genes to remove
@@ -159,39 +225,6 @@ remove_unwanted_genes <- function(obj) {
   obj <- subset(obj, features = rownames(counts_filtered))
   
   return(obj)
-}
-
-
-
-get_organ_barcodes <- function(obj, histology_name){
-  # Get barcode of the given histology type
-  obj <- get_organ_subset(obj, histology_name = histology_name)
-  obj_barcodes <- obj@fdata[[obj@samples]]$barcodes
-  return(obj_barcodes)
-}
-
-convert2Seurat <- function (spata_obj, image_path){
-  # convert a Spata object into seurat
-  # using transformSpataToSeurat() doesnt add image to the seurat object
-  # so created this function to manually add image and create a seurat obj
-  
-  seurat_obj <- SPATA2::transformSpataToSeurat(spata_obj, NormalizeData=F, 
-                                               FindVariableFeatures=F, SCTransform = F,
-                                               ScaleData=F, RunPCA=F, FindNeighbors=F, 
-                                               FindClusters=F, RunTSNE = F,
-                                               RunUMAP = F)
-  seurat_obj <- base::tryCatch({
-    lowres <- Read10X_Image(image_path, image.name = "tissue_lowres_image.png")
-    seurat_obj@images$slice1 = lowres
-    seurat_obj@images$slice1@assay = "Spatial"
-    seurat_obj@images$slice1@key = "slice1_"
-    base::warning("The SpatialImage is manually added to the Seurat Object")
-    seurat_obj
-  }, error = function(error) {
-    base::warning("Error in adding image slice manually")
-  })
-  return(seurat_obj)
-  
 }
 
 process_Seurat <- function(obj, npcs=20, dims=20, res=0.8){
@@ -250,17 +283,6 @@ get_highly_exp_genes <- function(obj, top_n=20, cluster=0, genenames=T, assay="R
   }
 }
 
-
-lm_eqn <- function(df){
-  m <- lm(y ~ x, df);
-  eq <- substitute(italic(y) == a + b %.% italic(x)*","~~italic(r)^2~"="~r2, 
-                   list(a = format(unname(coef(m)[1]), digits = 2),
-                        b = format(unname(coef(m)[2]), digits = 2),
-                        r2 = format(summary(m)$r.squared, digits = 3)))
-  as.character(as.expression(eq));
-}
-
-
 plotAverageExp_between_clusters <- function(obj, x_clus=NULL, y_clus=NULL, 
                                             assay="RNA", top=10){
   
@@ -306,6 +328,50 @@ plotAverageExp_between_clusters <- function(obj, x_clus=NULL, y_clus=NULL,
 }
 
 
+#### other common utils ####
+
+
+lm_eqn <- function(df){
+  m <- lm(y ~ x, df);
+  eq <- substitute(italic(y) == a + b %.% italic(x)*","~~italic(r)^2~"="~r2, 
+                   list(a = format(unname(coef(m)[1]), digits = 2),
+                        b = format(unname(coef(m)[2]), digits = 2),
+                        r2 = format(summary(m)$r.squared, digits = 3)))
+  as.character(as.expression(eq));
+}
+
+
+check_save_dea_data <- function(markers, path, filename){
+  
+  if (file.exists(filename)) {
+    #Delete file if it exists
+    file.remove(filename)
+    write.table(markers, file = file.path(path,filename),
+                sep = ",",
+                append = F,
+                col.names=T, 
+                row.names = F)
+  }else{
+    write.table(markers, file = file.path(path,filename),
+                sep = ",",
+                append = F,
+                col.names=T, 
+                row.names = F)
+  }
+}
+
+
+isString <- function(input) {
+  is.character(input) & length(input) == 1
+}
+
+toCommaString <- function(genelist){
+  # converting vector
+  vec2 <- shQuote(genelist, type = "cmd")
+  # combining elements using , 
+  comma_vec2 <- paste(vec2, collapse = ", ")
+  return(cat(comma_vec2))
+}
 
 df2longdf <- function(df){
   df$gene <- rownames(df)
@@ -313,67 +379,7 @@ df2longdf <- function(df){
   return(df)
 }
 
-plot_average_exp_HeatMap <- function(obj){
-  
-  n = length(unique(obj$seurat_clusters))
-  datalist = vector("list", length = n)
-  for (i in 1:n){
-    exp_data <- as.data.frame(get_highly_exp_genes(obj, cluster=i-1, genenames = F))
-    exp_data$gene <- rownames(exp_data)
-    exp_data <- exp_data %>% gather(key='sample', value='value', -gene)
-    datalist[[i]] <- exp_data
-  }
-  
-  alldata = do.call(rbind, datalist)
-  ggplot(alldata, aes(sample, gene)) + geom_tile(aes(fill=value))
-}  
-
-library(viridis)
-plotHeatMap <- function(df){
-  og <- df
-  df$gene <- rownames(df)
-  df <- df %>% gather(key='cluster', value='value', -gene)
-  ggplot(df, aes(cluster, gene, fill=value)) + 
-    geom_tile() + 
-    scale_fill_viridis()
-}
-
-getNwriteDEG_df <- function(markers, path=NULL, file_name=NULL, pcut=1e-2, FCcut=1, 
-                            rankbyFC=F,
-                            rankbyPval=F,
-                            rankbyAdjPval=F, 
-                            write=F){
-  #:markers: results of FindMarkers
-  #:path: relative path to save
-  #:filename: filename to save
-  
-  ge <- markers %>%
-    as.data.frame() %>%
-    filter(p_val < pcut & abs(avg_log2FC) > FCcut)
-  
-  if (rankbyFC){
-    ge <- arrange(ge, desc(avg_log2FC))
-  }
-  
-  if (rankbyPval){
-    ge <- arrange(ge, p_val)
-  }
-  
-  if (rankbyAdjPval){
-    ge <- arrange(ge, p_val_adj)
-  }
-  
-  if (!is.null(path) & !is.null(file_name)){
-    write.table(ge, 
-              file = file.path(merged_save_path, paste0(file_name, ".csv")),
-              sep = ",", 
-              row.names = F, 
-              quote = FALSE)
-  }
-  return(ge)
-}
-
-# STDeconvolve
+#### STDeconvolve ####
 
 seurat_to_spe <- function(seu, sample_id, img_id) {
   ## Convert to SCE
