@@ -2,6 +2,7 @@
 # RNASEq Utils
 
 save_it <- function(image_object, filepath, filename, resolution=300, w=800, h=650, format=NULL){
+  # save files in png or pdf
   if (tolower(format) == "png"){
     png(paste0(filepath,"/",filename,".png"), res=resolution, width=w, height=h)
     print(image_object)
