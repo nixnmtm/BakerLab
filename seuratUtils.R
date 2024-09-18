@@ -128,9 +128,9 @@ remove_HB_genes <- function(obj){
 
 ####Seurat Visium####
 
-plot_average_exp_HeatMap <- function(obj){
+plot_average_exp_HeatMap <- function(obj, cluster_colname){
   
-  n = length(unique(obj$seurat_clusters))
+  n = length(levels(bl[[cluster_colname]][[cluster_colname]]))
   datalist = vector("list", length = n)
   for (i in 1:n){
     exp_data <- as.data.frame(get_highly_exp_genes(obj, cluster=i-1, genenames = F))
@@ -330,6 +330,47 @@ plotAverageExp_between_clusters <- function(obj, x_clus=NULL, y_clus=NULL,
 
 #### other common utils ####
 
+# from Human to Mouse
+convertHumanGeneList <- function(x){
+  
+  library("biomaRt")
+  #human <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+  hs_mart <- useEnsembl("ensembl","hsapiens_gene_ensembl", mirror = "useast", host = "www.ensembl.org")
+  mm_mart <- useEnsembl("ensembl","mmusculus_gene_ensembl", mirror = "useast", host = "www.ensembl.org")
+  #mouse <- useMart("ensembl", dataset = "mmusculus_gene_ensembl")
+  
+  genesV2 <- getLDS(attributes = c("hgnc_symbol"), filters = "hgnc_symbol", 
+                    values = x , mart = hs_mart, attributesL = c("mgi_symbol"), martL = mm_mart, uniqueRows=T)
+  
+  humanx <- unique(genesV2[, 2])
+  
+  return(humanx)
+}
+
+mapgenes_mm_hs <- function(genes, mouse2human=F, human2mouse=F){
+  # Converts genes from mouse 2 human or from human 2 mouse 
+  library(Orthology.eg.db)
+  library(org.Mm.eg.db)
+  library(org.Hs.eg.db)
+  if(mouse2human){
+    gns <- mapIds(org.Mm.eg.db, genes, "ENTREZID", "SYMBOL")
+    mapped <- select(Orthology.eg.db, gns, "Homo_sapiens","Mus_musculus")
+    naind <- is.na(mapped$Homo_sapiens)
+    hsymb <- mapIds(org.Hs.eg.db, as.character(mapped$Homo_sapiens[!naind]), "SYMBOL", "ENTREZID")
+    out <- data.frame(Mouse_symbol = genes, mapped, Human_symbol = NA)
+    out$Human_symbol[!naind] <- hsymb
+  }
+  if(human2mouse){
+    gns <- mapIds(org.Hs.eg.db, genes, "ENTREZID", "SYMBOL")
+    mapped <- select(Orthology.eg.db, gns, "Mus_musculus", "Homo_sapiens")
+    naind <- is.na(mapped$Mus_musculus)
+    msymb <- mapIds(org.Mm.eg.db, as.character(mapped$Mus_musculus[!naind]), "SYMBOL", "ENTREZID")
+    out <- data.frame(Human_symbol = genes, mapped, Mouse_symbol = NA)
+    out$Mouse_symbol[!naind] <- msymb
+  }
+  
+  return(out)
+}
 
 lm_eqn <- function(df){
   m <- lm(y ~ x, df);
