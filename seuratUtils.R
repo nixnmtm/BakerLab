@@ -327,6 +327,88 @@ plotAverageExp_between_clusters <- function(obj, x_clus=NULL, y_clus=NULL,
   p1
 }
 
+ibrary(ggplot2)
+library(RColorBrewer)
+library(dplyr)  # For data manipulation
+
+# Function to generate a consistent color palette for cell types
+generate_color_palette <- function(cell_types) {
+  # Generate a color palette based on the number of unique cell types
+  num_cell_types <- length(unique(cell_types))
+  
+  # Use Set1 or another suitable palette for categorical data
+  colors <- brewer.pal(min(num_cell_types, 12), "Set1")
+  
+  # Create a named vector of colors for the cell types
+  color_mapping <- setNames(colors[1:num_cell_types], unique(cell_types))
+  
+  return(color_mapping)
+}
+
+total_celltype_proportion <- function(sp.obj, assay_name = "predictions", 
+                                      layer_name = "data", 
+                                      plot = FALSE, color_mapping = NULL) {
+  # Retrieve the prediction data
+  pred <- GetAssayData(object = sp.obj, assay = assay_name, layer = layer_name)
+  
+  # Check if pred is a valid object
+  if (is.null(pred) || nrow(pred) == 0) {
+    stop("No prediction data found.")
+  }
+  
+  # Exclude the last row (assumed to be max values)
+  proportion_matrix <- pred[1:(nrow(pred) - 1), , drop = FALSE]
+  
+  # Calculate total proportions
+  cell_type_totals <- rowSums(proportion_matrix)
+  total_proportions <- cell_type_totals / sum(cell_type_totals)
+  
+  if (plot) {
+    # Prepare the data for plotting
+    proportion_df <- data.frame(
+      CellType = names(total_proportions),
+      Proportion = total_proportions,
+      Label = paste0(round(total_proportions, 2))  # Convert to percentage for display
+    ) %>%
+      arrange(desc(Proportion))  # Arrange in descending order by proportion
+    
+    # Reorder the CellType factor based on total proportions
+    proportion_df$CellType <- factor(proportion_df$CellType, levels = proportion_df$CellType)
+    
+    # Check if proportion_df is valid
+    if (nrow(proportion_df) == 0) {
+      stop("No data available for plotting.")
+    }
+    
+    # Generate color mapping if not provided
+    if (is.null(color_mapping)) {
+      color_mapping <- generate_color_palette(proportion_df$CellType)
+    }
+    
+    # Print the proportion data frame
+    print(proportion_df)
+    
+    # Create the stacked horizontal bar graph
+    p <- ggplot(proportion_df, aes(x = "", y = Proportion, fill = CellType)) +
+      geom_bar(stat = "identity", position = "stack") +                    # Create stacked bars
+      geom_text(aes(label = Label),                                         # Add proportion labels
+                position = position_stack(vjust = 0.5),                  # Position labels in the middle
+                color = "black", size = 4) +                             # Customize text color and size
+      ggtitle("Proportion of Cell Types Across All Spatial Spots") + 
+      labs(x = "", y = "Proportion (%)") +                                 # Axis labels
+      theme_minimal() +                                                   # Simple theme
+      scale_fill_manual(values = color_mapping) +                        # Use generated colors
+      coord_flip() +                                                      # Flip coordinates for horizontal bars
+      theme(legend.title = element_blank())                                # Remove legend title for clarity
+    
+    # Print the plot
+    print(p)
+  }
+  
+  return(total_proportions)  # Return the calculated proportions
+}
+
+
 
 #### other common utils ####
 
