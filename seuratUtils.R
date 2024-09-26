@@ -3,6 +3,7 @@
 
 
 ####SPATA utils####  
+source("~/research/coding/NGS_utils/RNASeqUtils.R")
 
 convert2Seurat <- function (spata_obj, image_path){
   # convert a Spata object into seurat
@@ -327,7 +328,7 @@ plotAverageExp_between_clusters <- function(obj, x_clus=NULL, y_clus=NULL,
   p1
 }
 
-ibrary(ggplot2)
+library(ggplot2)
 library(RColorBrewer)
 library(dplyr)  # For data manipulation
 
@@ -345,9 +346,27 @@ generate_color_palette <- function(cell_types) {
   return(color_mapping)
 }
 
+anchorMapping <- function(reference, query, query.dims=15, anchor.labels,save.loc=FALSE,metadata_colname="subclass",
+                          normalization = "LogNormalize", reduction.method="cca"){
+  DefaultAssay(query) <- "Spatial"
+  anchors = FindTransferAnchors(reference, query = query,  normalization.method = normalization,
+                                reduction = reduction.method)
+  predictions.assay <- TransferData(anchorset = anchors, refdata = ref_bl[[metadata_colname, drop = TRUE]], 
+                                    prediction.assay=TRUE, weight.reduction=reduction.method, dims=1:query.dims)
+  non.mapping <- c()
+  for(i in 1:dim(predictions.assay)[1]){ if(sum(predictions.assay@data[i,])==0) 
+    non.mapping <- c(non.mapping, rownames(predictions.assay[i]))}
+  predictions.assay@misc$non.mapping <- non.mapping
+  predictions.assay@misc$mapping <- setdiff(anchor.labels, non.mapping)
+  query[["predictions"]] <- predictions.assay
+  DefaultAssay(query) <- 'predictions'
+  return(query)
+}
+
 total_celltype_proportion <- function(sp.obj, assay_name = "predictions", 
                                       layer_name = "data", 
-                                      plot = FALSE, color_mapping = NULL) {
+                                      plot = FALSE, color_mapping = NULL,
+                                      savepath=NULL, prefix=NULL) {
   # Retrieve the prediction data
   pred <- GetAssayData(object = sp.obj, assay = assay_name, layer = layer_name)
   
@@ -368,7 +387,7 @@ total_celltype_proportion <- function(sp.obj, assay_name = "predictions",
     proportion_df <- data.frame(
       CellType = names(total_proportions),
       Proportion = total_proportions,
-      Label = paste0(round(total_proportions, 2))  # Convert to percentage for display
+      Label = paste0(round(total_proportions, 3)*100, "%")  # Convert to percentage for display
     ) %>%
       arrange(desc(Proportion))  # Arrange in descending order by proportion
     
@@ -382,7 +401,7 @@ total_celltype_proportion <- function(sp.obj, assay_name = "predictions",
     
     # Generate color mapping if not provided
     if (is.null(color_mapping)) {
-      color_mapping <- generate_color_palette(proportion_df$CellType)
+      color_mapping <- colorRampPalette(brewer.pal(9, "Set1"))(length(unique(proportion_df$CellType)))
     }
     
     # Print the proportion data frame
@@ -393,7 +412,7 @@ total_celltype_proportion <- function(sp.obj, assay_name = "predictions",
       geom_bar(stat = "identity", position = "stack") +                    # Create stacked bars
       geom_text(aes(label = Label),                                         # Add proportion labels
                 position = position_stack(vjust = 0.5),                  # Position labels in the middle
-                color = "black", size = 4) +                             # Customize text color and size
+                color = "black", size = 4, angle=90) +                             # Customize text color and size
       ggtitle("Proportion of Cell Types Across All Spatial Spots") + 
       labs(x = "", y = "Proportion (%)") +                                 # Axis labels
       theme_minimal() +                                                   # Simple theme
@@ -401,11 +420,17 @@ total_celltype_proportion <- function(sp.obj, assay_name = "predictions",
       coord_flip() +                                                      # Flip coordinates for horizontal bars
       theme(legend.title = element_blank())                                # Remove legend title for clarity
     
+    if(!is.null(savepath)){
+      save_it(p, filepath=savepath, filename = paste0(prefix, "_total_celltype_proportions"), 
+              format = "png", w=3000, h=1500)
+    }
+    
+    
     # Print the plot
     print(p)
   }
   
-  return(total_proportions)  # Return the calculated proportions
+  return(proportion_df)  # Return the calculated proportions
 }
 
 
