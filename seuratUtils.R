@@ -346,12 +346,13 @@ generate_color_palette <- function(cell_types) {
   return(color_mapping)
 }
 
-anchorMapping <- function(reference, query, query.dims=15, anchor.labels,save.loc=FALSE,metadata_colname="subclass",
+anchorMapping <- function(reference, query, query.dims=15, anchor.labels,save.loc=FALSE,
+                          metadata_colname="subclass",
                           normalization = "LogNormalize", reduction.method="cca"){
   DefaultAssay(query) <- "Spatial"
   anchors = FindTransferAnchors(reference, query = query,  normalization.method = normalization,
                                 reduction = reduction.method)
-  predictions.assay <- TransferData(anchorset = anchors, refdata = ref_bl[[metadata_colname, drop = TRUE]], 
+  predictions.assay <- TransferData(anchorset = anchors, refdata = reference[[metadata_colname, drop = TRUE]], 
                                     prediction.assay=TRUE, weight.reduction=reduction.method, dims=1:query.dims)
   non.mapping <- c()
   for(i in 1:dim(predictions.assay)[1]){ if(sum(predictions.assay@data[i,])==0) 
@@ -384,12 +385,15 @@ total_celltype_proportion <- function(sp.obj, assay_name = "predictions",
   
   if (plot) {
     # Prepare the data for plotting
+    
     proportion_df <- data.frame(
       CellType = names(total_proportions),
       Proportion = total_proportions,
-      Label = paste0(round(total_proportions, 3)*100, "%")  # Convert to percentage for display
-    ) %>%
-      arrange(desc(Proportion))  # Arrange in descending order by proportion
+      Percentage = paste0(round(total_proportions, 3)*100, "%")  # Convert to percentage for display
+    )# %>%
+      #arrange(desc(Proportion))  # Arrange in descending order by proportion
+    
+    proportion_df$Label <- paste0(proportion_df$Percentage, "(",proportion_df$CellType,")")
     
     # Reorder the CellType factor based on total proportions
     proportion_df$CellType <- factor(proportion_df$CellType, levels = proportion_df$CellType)
@@ -404,9 +408,6 @@ total_celltype_proportion <- function(sp.obj, assay_name = "predictions",
       color_mapping <- colorRampPalette(brewer.pal(9, "Set1"))(length(unique(proportion_df$CellType)))
     }
     
-    # Print the proportion data frame
-    print(proportion_df)
-    
     # Create the stacked horizontal bar graph
     p <- ggplot(proportion_df, aes(x = "", y = Proportion, fill = CellType)) +
       geom_bar(stat = "identity", position = "stack") +                    # Create stacked bars
@@ -414,7 +415,7 @@ total_celltype_proportion <- function(sp.obj, assay_name = "predictions",
                 position = position_stack(vjust = 0.5),                  # Position labels in the middle
                 color = "black", size = 4, angle=90) +                             # Customize text color and size
       ggtitle("Proportion of Cell Types Across All Spatial Spots") + 
-      labs(x = "", y = "Proportion (%)") +                                 # Axis labels
+      labs(x = "", y = paste0("Proportion (%)")) +                                 # Axis labels
       theme_minimal() +                                                   # Simple theme
       scale_fill_manual(values = color_mapping) +                        # Use generated colors
       coord_flip() +                                                      # Flip coordinates for horizontal bars
