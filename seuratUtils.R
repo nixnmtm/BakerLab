@@ -131,7 +131,7 @@ remove_HB_genes <- function(obj){
 
 plot_average_exp_HeatMap <- function(obj, cluster_colname){
   
-  n = length(levels(bl[[cluster_colname]][[cluster_colname]]))
+  n = length(levels(obj[[cluster_colname]][[cluster_colname]]))
   datalist = vector("list", length = n)
   for (i in 1:n){
     exp_data <- as.data.frame(get_highly_exp_genes(obj, cluster=i-1, genenames = F))
@@ -153,6 +153,41 @@ plotHeatMap <- function(df){
     geom_tile() + 
     scale_fill_viridis()
 }
+
+plot_ComplexHeatMap <- function(obj, markers, metadata_cluster_colname=NULL) {
+  
+  mat<- obj[["RNA"]]$data[markers$gene, ] %>% as.matrix()
+  
+  ## scale the rows
+  mat<- t(scale(t(mat)))
+  
+  cluster_anno<- obj@meta.data[[metadata_cluster_colname]]
+  print(cluster_anno)
+  quantile(mat, c(0.1, 0.95))
+  
+  Seurat::PurpleAndYellow()
+  ## make the black color map to 0. the yellow map to highest and the purle map to the lowest
+  col_fun = circlize::colorRamp2(c(-1, 0, 2), c("#FF00FF", "black", "#FFFF00"))
+  
+  library(ComplexHeatmap)
+  Heatmap(mat, name = "Expression",  
+          column_split = factor(cluster_anno, levels=levels(cluster_anno)),
+          cluster_columns = TRUE,
+          show_column_dend = FALSE,
+          cluster_column_slices = FALSE,
+          column_title_gp = gpar(fontsize = 8),
+          column_gap = unit(0.5, "mm"),
+          cluster_rows = FALSE,
+          show_row_dend = FALSE, 
+          col = col_fun,
+          row_names_gp = gpar(fontsize = 8),
+          column_title_rot = 90,
+          top_annotation = HeatmapAnnotation(foo = anno_block(gp = gpar(fill = scales::hue_pal()(9)))),
+          show_column_names = FALSE,
+          use_raster = TRUE,
+          raster_quality = 4)
+}
+
 
 getNwriteDEG_df <- function(markers, path=NULL, file_name=NULL, pcut=1e-2, FCcut=1, 
                             rankbyFC=F,
