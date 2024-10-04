@@ -747,14 +747,14 @@ save_to_fetch_gene_details <- function(deconGexp, top=20,
 }
 
 
-vlnplot_w_significance <- function(obj, gene_signature, file_name, group_by = NONE, 
+vlnplot_w_significance <- function(obj, gene_signature, file_name=NULL, group_by = NULL, 
                                    test_sign, y_max,w=14, h=8){
   plot_case <- function(signature){
     library(ggplot2)
     library(ggpubr)
     
     VlnPlot(obj, features = signature,
-            pt.size =  0.5, 
+            pt.size =  0.5, #ncol=3,
             group.by = group_by, 
             y.max = y_max, # add the y-axis maximum value - otherwise p-value hidden
     ) + 
@@ -763,8 +763,10 @@ vlnplot_w_significance <- function(obj, gene_signature, file_name, group_by = NO
     #+stat_compare_means(comparisons = test_sign, label = "p.format")
   }
   print(map(gene_signature, plot_case) %>% cowplot::plot_grid(plotlist = .))
-  file_name <- paste0(file_name, "_VlnPlot.png")
-  ggsave(file_name, width = w, height = h)
+  if (!is_null(file_name)){
+    file_name <- paste0(file_name, "_VlnPlot.png")
+    ggsave(file_name, width = w, height = h)
+  }
 }
 
 
