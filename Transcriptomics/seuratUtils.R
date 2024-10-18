@@ -3,7 +3,7 @@
 
 
 ####SPATA utils####  
-source("~/research/coding/NGS_utils/RNASeqUtils.R")
+source("~/research/coding/NGS_utils/Transcriptomics/RNASeqUtils.R")
 
 convert2Seurat <- function (spata_obj, image_path){
   # convert a Spata object into seurat
@@ -561,6 +561,46 @@ df2longdf <- function(df){
   df$gene <- rownames(df)
   df <- df %>% gather(key='sample', value='value', -gene)
   return(df)
+}
+
+####  RCTD  ####
+
+# copied the function fropm spacexr and added w and h
+plot_cond_occur_mod <- function (cell_type_names, resultsdir, weights, puck, w=10, h=10) 
+{
+  occur <- numeric(length(cell_type_names))
+  names(occur) = cell_type_names
+  for (i in 1:length(cell_type_names)) {
+    cell_type = cell_type_names[i]
+    my_cond = weights[, cell_type] > pmax(0.25, 2 - log(puck@nUMI,2) / 5)
+    occur[cell_type] = sum(my_cond)
+  }
+  df <- reshape2::melt(as.list(occur))
+  colnames(df) = c("Count", "Cell_Type")
+  pdf(file.path(resultsdir, "cell_type_occur.pdf"), width = w, height = h)
+  plot <- ggplot2::ggplot(df, ggplot2::aes(x = Cell_Type, y = Count, 
+                                           fill = Cell_Type)) + ggplot2::geom_bar(stat = "identity") + 
+    ggplot2::theme_minimal()
+  invisible(print(plot))
+  dev.off()
+  return(plot)
+}
+
+create_SpatialRNA_puck <- function(obj, layer="counts", image="s1"){
+  # Get gene expression counts
+  sp_counts <- LayerData(obj, assay = "Spatial", layer = layer)
+  sp_coords <- GetTissueCoordinates(obj, image = image) 
+  
+  if ("cell" %in% names(sp_coords)){
+    sp_coords <- sp_coords %>% select(-cell)
+  }
+  colnames(sp_coords) <- c("x", "y")
+  sp_coords[is.na(colnames(sp_coords))] <- NULL
+  
+  # Create a query in spacexr
+  query <- spacexr::SpatialRNA(sp_coords, sp_counts, colSums(sp_counts))
+  query <- restrict_puck(query, colnames(query@counts))
+  return(query)  
 }
 
 #### STDeconvolve ####
