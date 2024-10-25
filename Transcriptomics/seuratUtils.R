@@ -403,6 +403,32 @@ total_celltype_proportion <- function(sp.obj, assay_name = "predictions",
                                       layer_name = "data", 
                                       plot = FALSE, color_mapping = NULL,
                                       savepath=NULL, prefix=NULL) {
+  
+  #' Calculate and Plot Total Cell Type Proportions
+  #'
+  #' Computes the proportions of cell types from a spatial transcriptomics object that has been anchor-mapped 
+  #' with a single-cell reference and includes a "predictions" assay. Optionally generates a plot to visualize 
+  #' these proportions.
+  #'
+  #' @param sp.obj A spatial transcriptomics object containing anchor-mapped data with single-cell reference 
+  #'               and a "predictions" assay.
+  #' @param assay_name Character. Name of the assay from which to retrieve data (default is "predictions").
+  #' @param layer_name Character. Name of the data layer in the assay (default is "data").
+  #' @param plot Logical. If TRUE, generates a plot showing cell type proportions (default is FALSE).
+  #' @param color_mapping Vector of colors for cell types. If NULL, colors are auto-generated.
+  #' @param savepath Character. Path to save the plot image (optional).
+  #' @param prefix Character. Prefix for the saved file name if savepath is provided (optional).
+  #'
+  #' @return A data frame with calculated proportions of each cell type.
+  #'
+  #' @details The function retrieves cell type prediction data from a spatial object that has been anchor-mapped 
+  #'          to a single-cell reference dataset and includes a "predictions" assay. It calculates the proportions 
+  #'          of each cell type and, if `plot = TRUE`, creates a stacked horizontal bar plot to visualize them.
+  #'
+  #' @examples
+  #' total_celltype_proportion(sp.obj = my_spatial_data, plot = TRUE, savepath = "output")
+  #'
+  
   # Retrieve the prediction data
   pred <- GetAssayData(object = sp.obj, assay = assay_name, layer = layer_name)
   
@@ -566,13 +592,18 @@ df2longdf <- function(df){
 ####  RCTD  ####
 
 # copied the function fropm spacexr and added w and h
-plot_cond_occur_mod <- function (cell_type_names, resultsdir, weights, puck, w=10, h=10) 
+plot_cond_occur_mod <- function (cell_type_names, resultsdir, weights, puck, w=10, h=10, weight_cutoff=NULL) 
 {
   occur <- numeric(length(cell_type_names))
   names(occur) = cell_type_names
   for (i in 1:length(cell_type_names)) {
     cell_type = cell_type_names[i]
-    my_cond = weights[, cell_type] > pmax(0.25, 2 - log(puck@nUMI,2) / 5)
+    if (!is_null(weight_cutoff)){
+      my_cond = weights[, cell_type] > weight_cutoff
+    }
+    else{
+      my_cond = weights[, cell_type] > pmax(0.25, 2 - log(puck@nUMI,2) / 5)
+    }
     occur[cell_type] = sum(my_cond)
   }
   df <- reshape2::melt(as.list(occur))
@@ -602,6 +633,58 @@ create_SpatialRNA_puck <- function(obj, layer="counts", image="s1"){
   query <- restrict_puck(query, colnames(query@counts))
   return(query)  
 }
+
+
+multi_rctd_2_cell_prop <- function(multi_rctd_obj){
+  #' Convert Multi-Mode RCTD Results to a Cell Proportion Matrix
+  #'
+  #' This function processes the results from an RCTD object that was run in "MULTI" mode and 
+  #' extracts the cell type proportions for each spot. It returns a matrix where rows represent
+  #' spots and columns represent cell types, with values corresponding to the proportions of each
+  #' cell type per spot.
+  #'
+  #' @param multi_rctd_obj An RCTD object that has been run in "MULTI" mode. 
+  #'   This object contains the cell type information and results needed for the matrix generation.
+  #'   For example, this can be created using `run.RCTD()` with `doublet_mode = "multi"`.
+  #'
+  #' @return A matrix of dimensions \code{total_spots} by \code{length(cell_types)}. The rows correspond to 
+  #'   the spots in the spatial data, and the columns correspond to the cell types. Each entry in the matrix
+  #'   is the proportion of a cell type for a given spot. Cell types that were not detected in a spot will have a value of 0.
+  #'   The row names of the matrix correspond to the spot IDs, and the column names represent the cell types.
+  #'
+  #' @examples
+  #' \dontrun{
+  #' # Assuming `multi_myRCTD` is a multi-mode RCTD object:
+  #' cell_prop_matrix <- multi_rctd_2_cell_prop(multi_myRCTD)
+  #' head(cell_prop_matrix) # View the first few rows of the matrix
+  #' }
+  #'
+  #' @export
+  
+  cell_types <- multi_rctd_obj@cell_type_info$info[[2]]
+  total_spots <- length(multi_rctd_obj@results)
+  
+  # Create an empty matrix
+  multi_mode_cell_prop <- matrix(0, nrow = total_spots, ncol = length(cell_types), 
+                                 dimnames = list(NULL, cell_types))
+  for (i in seq_along(multi_rctd_obj@results)) {
+    sub_weights <- multi_rctd_obj@results[[i]]$sub_weights
+    conf_list <- multi_rctd_obj@results[[i]]$conf_list
+    
+    # Match the names of sub_weights with the column names (cell_types)
+    # and place the values in the corresponding columns of the matrix
+    matching_indices <- match(names(conf_list), cell_types)
+    
+    # Fill the matrix at row 'i' with the sub_weights values in the matching columns
+    multi_mode_cell_prop[i, matching_indices] <- sub_weights
+  }
+  
+  rownames(multi_mode_cell_prop) <- colnames(multi_rctd_obj@spatialRNA@counts)
+  return(multi_mode_cell_prop) 
+  
+}
+
+
 
 #### STDeconvolve ####
 
