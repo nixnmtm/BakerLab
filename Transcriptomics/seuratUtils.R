@@ -1,8 +1,6 @@
 # Single Cell/Spatial Utility functions
 # Author: Nixon Raj
 
-
- 
 source("~/research/coding/NGS_utils/Transcriptomics/RNASeqUtils.R")
 ####Seurat Visium####
 
@@ -591,7 +589,47 @@ multi_rctd_2_cell_prop <- function(multi_rctd_obj){
   
 }
 
+normalize <- function(x){ 
+  # normalize a vector
+  return(x/sum(x)) 
+}
 
+RCTD_celltype_average_prop <- function(multi_rctd_obj, normalize=F, celltype=NULL){
+  #' Calculate Average Proportion of Cell Types in a RCTD object 
+  #'
+  #' Computes the average proportion of cell types from a RCTD object (MULTI mode), optionally normalizing the 
+  #' result and returning a specific cell type's proportion if specified.
+  #'
+  #' @param multi_rctd_obj A multi-sample RC-TD object containing cell type proportion data.
+  #' @param normalize Logical. If TRUE, normalizes the average proportions (default is FALSE).
+  #' @param celltype Character. Specific cell type to retrieve the average proportion for (optional).
+  #'
+  #' @return Numeric vector of average proportions for all cell types, or a single value if `celltype` is specified.
+  #'
+  #' @details This function retrieves cell type proportions across multiple samples, calculates the average 
+  #'          proportions for each cell type, and can return the average of a specified cell type. Zeros are 
+  #'          converted to NA for accurate averaging.
+  #'
+  #' @examples
+  #' celltype_average_prop(multi_rctd_obj = my_multi_rctd_data, normalize = TRUE, celltype = "B_cells")
+  #'
+  #'
+  
+  # First get the celltype proportions
+  multi_mode_cell_prop <- as.data.frame(multi_rctd_2_cell_prop(multi_rctd_obj))
+  multi_mode_cell_prop[multi_mode_cell_prop == 0] <- NA 
+  # Calculate average proportions, only pixels with expression of the celltype is considered
+  avg_prop <- colMeans(multi_mode_cell_prop, na.rm = TRUE) %>% replace_na(0)
+  if (normalize){
+    avg_prop <- normalize(avg_prop)
+  }
+  if (is.null(celltype)){ 
+    return(avg_prop)
+  }
+  else{
+    return(avg_prop[[celltype]])
+  }
+}
 
 #### STDeconvolve ####
 
