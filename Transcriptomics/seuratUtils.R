@@ -2,131 +2,8 @@
 # Author: Nixon Raj
 
 
-####SPATA utils####  
+ 
 source("~/research/coding/NGS_utils/Transcriptomics/RNASeqUtils.R")
-
-convert2Seurat <- function (spata_obj, image_path){
-  # convert a Spata object into seurat
-  # using transformSpataToSeurat() doesnt add image to the seurat object
-  # so created this function to manually add image and create a seurat obj
-  
-  seurat_obj <- SPATA2::transformSpataToSeurat(spata_obj, NormalizeData=F, 
-                                               FindVariableFeatures=F, SCTransform = F,
-                                               ScaleData=F, RunPCA=F, FindNeighbors=F, 
-                                               FindClusters=F, RunTSNE = F,
-                                               RunUMAP = F)
-  seurat_obj <- base::tryCatch({
-    lowres <- Read10X_Image(image_path, image.name = "tissue_lowres_image.png")
-    seurat_obj@images$slice1 = lowres
-    seurat_obj@images$slice1@assay = "Spatial"
-    seurat_obj@images$slice1@key = "slice1_"
-    base::warning("The SpatialImage is manually added to the Seurat Object")
-    seurat_obj
-  }, error = function(error) {
-    base::warning("Error in adding image slice manually")
-  })
-  return(seurat_obj)
-  
-}
-
-
-get_all_histology_subset <- function(spata2_obj){
-  "Create a subset based on barcodes present in organ segmentation defined, returns all segmentations except unnamed"
-  fdata <- spata2_obj@fdata[[spata2_obj@samples]]
-  segment_barcodes <- fdata[fdata$histology != "unnamed",]$barcodes
-  subset_obj <- subsetByBarcodes(spata2_obj, barcodes = segment_barcodes, verbose = T)
-  return(subset_obj)
-}
-
-get_organ_subset <- function(spata2_obj, histology_name){
-  "Create a subset based on histology name given"
-  fdata <- spata2_obj@fdata[[spata2_obj@samples]]
-  if (isString(histology_name)){
-    segment_barcodes <- fdata[fdata$histology == histology_name,]$barcodes
-  } else {
-    segment_barcodes <- fdata[fdata$histology %in% histology_name,]$barcodes
-  }
-  subset_obj <- subsetByBarcodes(spata2_obj, barcodes = segment_barcodes, verbose = T)
-  return(subset_obj)
-}
-
-plot_surface_by_histology <- function(spata2_obj, histology_name=NULL) {
-  # plotSurface based on the histology name/names provided
-  if(is.null(histology_name)){
-    plotSurface(spata2_obj, color_by="histology", pt_clrp = "lo", display_title=T)
-  }else{
-    spata2_subset <- get_organ_subset(spata2_obj, histology_name)
-    plotSurface(spata2_subset, color_by="histology", pt_clrp = "lo", display_title=T)
-  }
-}
-
-merge_histology <- function(spata2_obj, histology_names_to_merge, new_histology_name){
-  # Merge histology types into a single type 
-  # (eg: histology_names_to_merge = c(gut1, gut2, gut3) to new_histology_name = "Gut")
-  
-  fdata <- spata2_obj@fdata[[spata2_obj@samples]]
-  paste("Before Merging:")
-  print(unique(fdata$histology))
-  fdata <- fdata %>% mutate(across(`histology`, as.character)) # change to char 
-  fdata$histology[fdata$histology %in% histology_names_to_merge] <- new_histology_name
-  
-  fdata <- fdata %>% mutate(across(`histology`, as.factor)) # change it back to factor
-  spata2_obj@fdata[[spata2_obj@samples]] <- fdata
-  nw_fdata <- spata2_obj@fdata[[spata2_obj@samples]]
-  paste("After Merging:")
-  print(unique(nw_fdata$histology))
-  return(spata2_obj)
-}
-
-get_organ_barcodes <- function(obj, histology_name){
-  # Get barcode of the given histology type
-  obj <- get_organ_subset(obj, histology_name = histology_name)
-  obj_barcodes <- obj@fdata[[obj@samples]]$barcodes
-  return(obj_barcodes)
-}
-
-calc_helper <- function(object,genes){
-  counts = GetAssayData(object, assay = "RNA", layer = "counts")
-  ncells = ncol(counts)
-  if(genes %in% row.names(counts)){
-    sum(counts[genes,]>0)/ncells
-    print(paste0("Number of cells expressing the gene", sum(counts[genes,]>0)))
-    print(paste0("Total Number of cells", ncells))
-  }else{return(NA)}
-}
-
-PrctCellExpringGene <- function(object, genes, group.by = "all"){
-  if(group.by == "all"){
-    prct = unlist(lapply(genes,calc_helper, object=object))
-    result = data.frame(Markers = genes, Cell_proportion = prct)
-    return(result)
-  }
-  
-  else{        
-    list = SplitObject(object, group.by)
-    factors = names(list)
-    
-    results = lapply(list, PrctCellExpringGene, genes=genes)
-    for(i in 1:length(factors)){
-      results[[i]]$Feature = factors[i]
-    }
-    combined = do.call("rbind", results)
-    return(combined)
-  }
-}
-
-remove_HB_genes <- function(obj){
-  # Remove all Hb genes from the object before any processing
-  counts <- GetAssayData(obj, assay = "Spatial")
-  print(dim(counts))
-  print(length(which(grepl("Hb", rownames(counts)))))
-  counts <- counts[-(which(grepl("Hb", rownames(counts)))),]
-  print(dim(counts))
-  obj <- subset(obj, features = rownames(counts))
-  return(obj)
-}
-
-
 ####Seurat Visium####
 
 plot_average_exp_HeatMap <- function(obj, cluster_colname){
@@ -495,99 +372,129 @@ total_celltype_proportion <- function(sp.obj, assay_name = "predictions",
   return(proportion_df)  # Return the calculated proportions
 }
 
-
-
-#### other common utils ####
-
-# from Human to Mouse
-convertHumanGeneList <- function(x){
+####SPATA utils#### 
+convert2Seurat <- function (spata_obj, image_path){
+  # convert a Spata object into seurat
+  # using transformSpataToSeurat() doesnt add image to the seurat object
+  # so created this function to manually add image and create a seurat obj
   
-  library("biomaRt")
-  #human <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
-  hs_mart <- useEnsembl("ensembl","hsapiens_gene_ensembl", mirror = "useast", host = "www.ensembl.org")
-  mm_mart <- useEnsembl("ensembl","mmusculus_gene_ensembl", mirror = "useast", host = "www.ensembl.org")
-  #mouse <- useMart("ensembl", dataset = "mmusculus_gene_ensembl")
+  seurat_obj <- SPATA2::transformSpataToSeurat(spata_obj, NormalizeData=F, 
+                                               FindVariableFeatures=F, SCTransform = F,
+                                               ScaleData=F, RunPCA=F, FindNeighbors=F, 
+                                               FindClusters=F, RunTSNE = F,
+                                               RunUMAP = F)
+  seurat_obj <- base::tryCatch({
+    lowres <- Read10X_Image(image_path, image.name = "tissue_lowres_image.png")
+    seurat_obj@images$slice1 = lowres
+    seurat_obj@images$slice1@assay = "Spatial"
+    seurat_obj@images$slice1@key = "slice1_"
+    base::warning("The SpatialImage is manually added to the Seurat Object")
+    seurat_obj
+  }, error = function(error) {
+    base::warning("Error in adding image slice manually")
+  })
+  return(seurat_obj)
   
-  genesV2 <- getLDS(attributes = c("hgnc_symbol"), filters = "hgnc_symbol", 
-                    values = x , mart = hs_mart, attributesL = c("mgi_symbol"), martL = mm_mart, uniqueRows=T)
-  
-  humanx <- unique(genesV2[, 2])
-  
-  return(humanx)
 }
 
-mapgenes_mm_hs <- function(genes, mouse2human=F, human2mouse=F){
-  # Converts genes from mouse 2 human or from human 2 mouse 
-  library(Orthology.eg.db)
-  library(org.Mm.eg.db)
-  library(org.Hs.eg.db)
-  if(mouse2human){
-    gns <- mapIds(org.Mm.eg.db, genes, "ENTREZID", "SYMBOL")
-    mapped <- select(Orthology.eg.db, gns, "Homo_sapiens","Mus_musculus")
-    naind <- is.na(mapped$Homo_sapiens)
-    hsymb <- mapIds(org.Hs.eg.db, as.character(mapped$Homo_sapiens[!naind]), "SYMBOL", "ENTREZID")
-    out <- data.frame(Mouse_symbol = genes, mapped, Human_symbol = NA)
-    out$Human_symbol[!naind] <- hsymb
+
+get_all_histology_subset <- function(spata2_obj){
+  "Create a subset based on barcodes present in organ segmentation defined, returns all segmentations except unnamed"
+  fdata <- spata2_obj@fdata[[spata2_obj@samples]]
+  segment_barcodes <- fdata[fdata$histology != "unnamed",]$barcodes
+  subset_obj <- subsetByBarcodes(spata2_obj, barcodes = segment_barcodes, verbose = T)
+  return(subset_obj)
+}
+
+get_organ_subset <- function(spata2_obj, histology_name){
+  "Create a subset based on histology name given"
+  fdata <- spata2_obj@fdata[[spata2_obj@samples]]
+  if (isString(histology_name)){
+    segment_barcodes <- fdata[fdata$histology == histology_name,]$barcodes
+  } else {
+    segment_barcodes <- fdata[fdata$histology %in% histology_name,]$barcodes
   }
-  if(human2mouse){
-    gns <- mapIds(org.Hs.eg.db, genes, "ENTREZID", "SYMBOL")
-    mapped <- select(Orthology.eg.db, gns, "Mus_musculus", "Homo_sapiens")
-    naind <- is.na(mapped$Mus_musculus)
-    msymb <- mapIds(org.Mm.eg.db, as.character(mapped$Mus_musculus[!naind]), "SYMBOL", "ENTREZID")
-    out <- data.frame(Human_symbol = genes, mapped, Mouse_symbol = NA)
-    out$Mouse_symbol[!naind] <- msymb
-  }
-  
-  return(out)
+  subset_obj <- subsetByBarcodes(spata2_obj, barcodes = segment_barcodes, verbose = T)
+  return(subset_obj)
 }
 
-lm_eqn <- function(df){
-  m <- lm(y ~ x, df);
-  eq <- substitute(italic(y) == a + b %.% italic(x)*","~~italic(r)^2~"="~r2, 
-                   list(a = format(unname(coef(m)[1]), digits = 2),
-                        b = format(unname(coef(m)[2]), digits = 2),
-                        r2 = format(summary(m)$r.squared, digits = 3)))
-  as.character(as.expression(eq));
-}
-
-
-check_save_dea_data <- function(markers, path, filename){
-  
-  if (file.exists(filename)) {
-    #Delete file if it exists
-    file.remove(filename)
-    write.table(markers, file = file.path(path,filename),
-                sep = ",",
-                append = F,
-                col.names=T, 
-                row.names = F)
+plot_surface_by_histology <- function(spata2_obj, histology_name=NULL) {
+  # plotSurface based on the histology name/names provided
+  if(is.null(histology_name)){
+    plotSurface(spata2_obj, color_by="histology", pt_clrp = "lo", display_title=T)
   }else{
-    write.table(markers, file = file.path(path,filename),
-                sep = ",",
-                append = F,
-                col.names=T, 
-                row.names = F)
+    spata2_subset <- get_organ_subset(spata2_obj, histology_name)
+    plotSurface(spata2_subset, color_by="histology", pt_clrp = "lo", display_title=T)
   }
 }
 
-
-isString <- function(input) {
-  is.character(input) & length(input) == 1
+merge_histology <- function(spata2_obj, histology_names_to_merge, new_histology_name){
+  # Merge histology types into a single type 
+  # (eg: histology_names_to_merge = c(gut1, gut2, gut3) to new_histology_name = "Gut")
+  
+  fdata <- spata2_obj@fdata[[spata2_obj@samples]]
+  paste("Before Merging:")
+  print(unique(fdata$histology))
+  fdata <- fdata %>% mutate(across(`histology`, as.character)) # change to char 
+  fdata$histology[fdata$histology %in% histology_names_to_merge] <- new_histology_name
+  
+  fdata <- fdata %>% mutate(across(`histology`, as.factor)) # change it back to factor
+  spata2_obj@fdata[[spata2_obj@samples]] <- fdata
+  nw_fdata <- spata2_obj@fdata[[spata2_obj@samples]]
+  paste("After Merging:")
+  print(unique(nw_fdata$histology))
+  return(spata2_obj)
 }
 
-toCommaString <- function(genelist){
-  # converting vector
-  vec2 <- shQuote(genelist, type = "cmd")
-  # combining elements using , 
-  comma_vec2 <- paste(vec2, collapse = ", ")
-  return(cat(comma_vec2))
+get_organ_barcodes <- function(obj, histology_name){
+  # Get barcode of the given histology type
+  obj <- get_organ_subset(obj, histology_name = histology_name)
+  obj_barcodes <- obj@fdata[[obj@samples]]$barcodes
+  return(obj_barcodes)
 }
 
-df2longdf <- function(df){
-  df$gene <- rownames(df)
-  df <- df %>% gather(key='sample', value='value', -gene)
-  return(df)
+calc_helper <- function(object,genes){
+  counts = GetAssayData(object, assay = "RNA", layer = "counts")
+  ncells = ncol(counts)
+  if(genes %in% row.names(counts)){
+    sum(counts[genes,]>0)/ncells
+    print(paste0("Number of cells expressing the gene", sum(counts[genes,]>0)))
+    print(paste0("Total Number of cells", ncells))
+  }else{return(NA)}
 }
+
+PrctCellExpringGene <- function(object, genes, group.by = "all"){
+  if(group.by == "all"){
+    prct = unlist(lapply(genes,calc_helper, object=object))
+    result = data.frame(Markers = genes, Cell_proportion = prct)
+    return(result)
+  }
+  
+  else{        
+    list = SplitObject(object, group.by)
+    factors = names(list)
+    
+    results = lapply(list, PrctCellExpringGene, genes=genes)
+    for(i in 1:length(factors)){
+      results[[i]]$Feature = factors[i]
+    }
+    combined = do.call("rbind", results)
+    return(combined)
+  }
+}
+
+remove_HB_genes <- function(obj){
+  # Remove all Hb genes from the object before any processing
+  counts <- GetAssayData(obj, assay = "Spatial")
+  print(dim(counts))
+  print(length(which(grepl("Hb", rownames(counts)))))
+  counts <- counts[-(which(grepl("Hb", rownames(counts)))),]
+  print(dim(counts))
+  obj <- subset(obj, features = rownames(counts))
+  return(obj)
+}
+
+
 
 ####  RCTD  ####
 
@@ -890,6 +797,98 @@ vlnplot_w_significance <- function(obj, gene_signature, file_name=NULL, group_by
     file_name <- paste0(file_name, "_VlnPlot.png")
     ggsave(file_name, width = w, height = h)
   }
+}
+
+#### other common utils ####
+
+# from Human to Mouse
+convertHumanGeneList <- function(x){
+  
+  library("biomaRt")
+  #human <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+  hs_mart <- useEnsembl("ensembl","hsapiens_gene_ensembl", mirror = "useast", host = "www.ensembl.org")
+  mm_mart <- useEnsembl("ensembl","mmusculus_gene_ensembl", mirror = "useast", host = "www.ensembl.org")
+  #mouse <- useMart("ensembl", dataset = "mmusculus_gene_ensembl")
+  
+  genesV2 <- getLDS(attributes = c("hgnc_symbol"), filters = "hgnc_symbol", 
+                    values = x , mart = hs_mart, attributesL = c("mgi_symbol"), martL = mm_mart, uniqueRows=T)
+  
+  humanx <- unique(genesV2[, 2])
+  
+  return(humanx)
+}
+
+mapgenes_mm_hs <- function(genes, mouse2human=F, human2mouse=F){
+  # Converts genes from mouse 2 human or from human 2 mouse 
+  library(Orthology.eg.db)
+  library(org.Mm.eg.db)
+  library(org.Hs.eg.db)
+  if(mouse2human){
+    gns <- mapIds(org.Mm.eg.db, genes, "ENTREZID", "SYMBOL")
+    mapped <- select(Orthology.eg.db, gns, "Homo_sapiens","Mus_musculus")
+    naind <- is.na(mapped$Homo_sapiens)
+    hsymb <- mapIds(org.Hs.eg.db, as.character(mapped$Homo_sapiens[!naind]), "SYMBOL", "ENTREZID")
+    out <- data.frame(Mouse_symbol = genes, mapped, Human_symbol = NA)
+    out$Human_symbol[!naind] <- hsymb
+  }
+  if(human2mouse){
+    gns <- mapIds(org.Hs.eg.db, genes, "ENTREZID", "SYMBOL")
+    mapped <- select(Orthology.eg.db, gns, "Mus_musculus", "Homo_sapiens")
+    naind <- is.na(mapped$Mus_musculus)
+    msymb <- mapIds(org.Mm.eg.db, as.character(mapped$Mus_musculus[!naind]), "SYMBOL", "ENTREZID")
+    out <- data.frame(Human_symbol = genes, mapped, Mouse_symbol = NA)
+    out$Mouse_symbol[!naind] <- msymb
+  }
+  
+  return(out)
+}
+
+lm_eqn <- function(df){
+  m <- lm(y ~ x, df);
+  eq <- substitute(italic(y) == a + b %.% italic(x)*","~~italic(r)^2~"="~r2, 
+                   list(a = format(unname(coef(m)[1]), digits = 2),
+                        b = format(unname(coef(m)[2]), digits = 2),
+                        r2 = format(summary(m)$r.squared, digits = 3)))
+  as.character(as.expression(eq));
+}
+
+
+check_save_dea_data <- function(markers, path, filename){
+  
+  if (file.exists(filename)) {
+    #Delete file if it exists
+    file.remove(filename)
+    write.table(markers, file = file.path(path,filename),
+                sep = ",",
+                append = F,
+                col.names=T, 
+                row.names = F)
+  }else{
+    write.table(markers, file = file.path(path,filename),
+                sep = ",",
+                append = F,
+                col.names=T, 
+                row.names = F)
+  }
+}
+
+
+isString <- function(input) {
+  is.character(input) & length(input) == 1
+}
+
+toCommaString <- function(genelist){
+  # converting vector
+  vec2 <- shQuote(genelist, type = "cmd")
+  # combining elements using , 
+  comma_vec2 <- paste(vec2, collapse = ", ")
+  return(cat(comma_vec2))
+}
+
+df2longdf <- function(df){
+  df$gene <- rownames(df)
+  df <- df %>% gather(key='sample', value='value', -gene)
+  return(df)
 }
 
 
