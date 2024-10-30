@@ -30,6 +30,16 @@ def split_GT(df, sample_cols):
             print("Length mismatch")
     return df
 
+def classify_genotype(genotype):
+    if genotype in ["0/1", "0|1", "1/0", "1|0"]:
+        return "Het"
+    elif genotype in ["1/1", "1|1"]:
+        return "Homo"       # Homozygous for the variant allele
+    elif genotype == ["0/0", "0|0"]:
+        return "Ref_Homo"    # Homozygous for the reference allele
+    else:
+        return "Other"       # For other cases like complex or unknown genotypes
+
 def postprocess_myanno(file_full_path, sample_id=None):
     """
     file_full_path: (str) absolute path of the annovar multianno.txt file
@@ -69,11 +79,19 @@ def postprocess_myanno(file_full_path, sample_id=None):
             df = split_GT(myanno, sample_cols=sample_names)
         else:
             raise Exception("If single sample VCF is used, please input the sample_id")
+        # Map genotype into Het or Homo
+        for sample in sample_names:
+            df[f"{sample}_Genotype"] = df[sample].str.split(':').str[0].apply(classify_genotype)
     else:
         df = myanno.rename(columns={"Otherinfo13": sample_id}, errors="raise")
         sample_names = df.loc[:, sample_id:].columns.values
-    return df, sample_names
+        # Map genotype into Het or Homo
+        df[f"Genotype"] = df[sample_id].str.split(':').str[0].apply(classify_genotype)
+
+    # extract the protein variants into separate column
+    df['protein_variants'] = df['AAChange.refGene'].str.findall(r'p\.\w+\d+\w+').str.join(', ')
     
+    return df, sample_names
 
 def get_columns(annovar_dbs_list, all_annovar_cols):
     """
@@ -206,6 +224,8 @@ def fetch_mygene(gene_name):
     #print(f"From mygene fn: {ens_id}")
     mg = mygene.MyGeneInfo()
     g = mg.getgene(ens_id)
+    if isinstance(g, list) and len(g) > 1:
+        g = g[0]
     return g
 
 import functools
@@ -232,7 +252,8 @@ def fetch_gene_details(gene_name):
     
     # Fetch protein atlas details
     protein_atlas = fetch_human_protein_atlas(gene_name)
-    if protein_atlas:
+
+    if protein_atlas is not None:
         for key in ["RNA tissue cell type enrichment", "Single cell expression cluster", "Tissue expression cluster"]:
             if key in protein_atlas:
                 if isinstance(protein_atlas[key], list) and len(protein_atlas[key]) > 1:
@@ -241,16 +262,16 @@ def fetch_gene_details(gene_name):
                     d[key] = protein_atlas[key]
             else:
                 d[key] = None
-    
+
     # Fetch gene-specific details from MyGene
     mygene = fetch_mygene(gene_name)
     if mygene:
         d["Summary"] = mygene.get("summary", None)
-    
+
     return d
 
 
-def populate_gene_details(sample_id, absolute_annovar_path, af_cut=0.001, basic_cols=True, all_variants=True):
+def populate_gene_details(sample_id, absolute_annovar_path, af_cut=0.001, all_variants=True, test_genelist=None):
     """
     **Populates gene deatils per variant**
     Runs the postprocess in annovar annotated results, filters variants for given allele frequency
@@ -271,26 +292,31 @@ def populate_gene_details(sample_id, absolute_annovar_path, af_cut=0.001, basic_
     
     from concurrent.futures import ThreadPoolExecutor, as_completed, ProcessPoolExecutor
     import time
+    from tqdm import tqdm
     
     # fetch annovar annotated results and postprocess it
     vc, sample_cols = postprocess_myanno(absolute_annovar_path, sample_id=sample_id)
-    
+
     # causal variants below aaf cutoff
     variants = filter_variants(vc, str(af_cut), all_type_variants=all_variants)
     
-    if basic_cols:
-        basic_cols = ["Start", "End","Ref", "ATLvcf1", "Gene.refGene", "ExonicFunc.refGene", "AAChange.refGene", "avsnp150", "gnomad40_exome_AF", 
-              "Interpro_domain", "SIFT_pred","Polyphen2_HVAR_pred","Polyphen2_HDIV_pred", "ClinPred_pred", "CADD_phred", "MutationTaster_pred",
-              'CLNSIG', 'phastCons100way_vertebrate', 'phastCons30way_mammalian', "FORMAT", sample_id]
-        variants = variants[basic_cols].reset_index()
-    else:
-        variants = variants.reset_index()
+    #if basic_cols:
+    #    basic_cols = ["Start", "End","Ref", "ATLvcf1", "Gene.refGene", "ExonicFunc.refGene", "AAChange.refGene", "avsnp150", "gnomad40_exome_AF", 
+    #          "Interpro_domain", "SIFT_pred","Polyphen2_HVAR_pred","Polyphen2_HDIV_pred", "ClinPred_pred", "CADD_phred", "MutationTaster_pred",
+    #          'CLNSIG', 'phastCons100way_vertebrate', 'phastCons30way_mammalian', "FORMAT", sample_id]
+    #    variants = variants[basic_cols].reset_index()
+    #else:
+    variants = variants.reset_index()
     
     # get gene details and merge with causal variants dataframe
-    genelist = np.unique(variants["Gene.refGene"].values)
-    with ThreadPoolExecutor(4) as tpe:
-        # execute tasks in parallel and gather the results
-        results_list = [result for result in tpe.map(fetch_gene_details, genelist)]       
+    genelist = np.unique(variants["Gene.refGene"].values) if test_genelist is None else test_genelist
+    
+    results_list = []
+    with ThreadPoolExecutor(max_workers=4) as tpe:
+        # Wrap the ThreadPoolExecutor with tqdm for a progress bar
+        for gene_result in tqdm(tpe.map(fetch_gene_details, genelist), total=len(genelist), desc="Fetching Human Protein Atlas for genes"):
+            results_list.append(gene_result)
+    
     gene_details = pd.DataFrame(results_list)
     
     # check for missing rows
@@ -309,15 +335,24 @@ def populate_gene_details(sample_id, absolute_annovar_path, af_cut=0.001, basic_
        
         # insert a column checking for atleast 2 deleterious predictions among 
         # SIFT_pred, CADD_phred, Polyphen2_HDIV_pred, MutationTaster_pred, ClinPred_pred
-        merged = get_atleast2deleterious(merged)
+        # merged = get_atleast2deleterious(merged)
+
+        # Get columns containing the word "genotype"
+        genotype_columns = merged.filter(like='Genotype').columns
+    
+        order_columns = ['sample_id','Chromosome','Gene.refGene', 'Start', 'End', 'Ref', 'Alt'] + list(genotype_columns) + ['protein_variants', 
+                         'gnomad40_exome_AF', 'SIFT_pred', 'Polyphen2_HDIV_pred', 'ClinPred_pred', 'CADD_phred', 'CLNDN', 'CLNSIG',
+                        'RNA tissue cell type enrichment', 'Single cell expression cluster', 'Tissue expression cluster']
+
+        # Reorder columns: first the selected columns, then the remaining columns
+        merged = merged[order_columns + [col for col in merged.columns if col not in order_columns]]
+        
         
         outpath = path.dirname(absolute_annovar_path)
-        if all_variants and base_cols:
-            merged.to_csv(path.join(outpath, f"af_{af_cut}_all_variants_imp_annotations.csv"), index=False)
-        elif all_variants:
-            merged.to_csv(path.join(outpath, f"af_{af_cut}_all_variants_all_annotations.csv"), index=False)
-        elif basic_cols and not all_variants:
-            merged.to_csv(path.join(outpath, f"af_{af_cut}_exonic_variants_imp_annotations.csv"), index=False)
+        if all_variants:
+            merged.to_csv(path.join(outpath, f"af_{af_cut}_all_variants.csv"), index=False)
+        else:
+            merged.to_csv(path.join(outpath, f"af_{af_cut}_exonic_variants.csv"), index=False)
             
         return merged
 

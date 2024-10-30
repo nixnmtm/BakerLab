@@ -64,18 +64,54 @@ plot_ComplexHeatMap <- function(obj, markers, metadata_cluster_colname=NULL) {
 }
 
 
+check_save_dea_data <- function(markers, path, filename, format="csv"){
+  
+  if (file.exists(filename)) {
+    #Delete file if it exists
+    file.remove(filename)
+    write.table(markers, file = file.path(path,paste0(filename, ".", format)),
+                sep = ",",
+                append = F,
+                col.names=T, 
+                row.names = F)
+  }else{
+    write.table(markers, file = file.path(path,paste0(filename, ".", format)),
+                sep = ",",
+                append = F,
+                col.names=T, 
+                row.names = F)
+  }
+}
+
+
 getNwriteDEG_df <- function(markers, path=NULL, file_name=NULL, pcut=1e-2, FCcut=1, 
                             rankbyFC=F,
                             rankbyPval=F,
-                            rankbyAdjPval=F, 
-                            write=F){
+                            rankbyAdjPval=F,
+                            rankbyPctDiff=T){
   #:markers: results of FindMarkers
   #:path: relative path to save
   #:filename: filename to save
   
-  ge <- markers %>%
+  ge <- markers %>% 
+    rownames_to_column("gene") %>%
     as.data.frame() %>%
-    filter(p_val < pcut & abs(avg_log2FC) > FCcut)
+    mutate(pct.diff=pct.1-pct.2)
+  
+  prefix="unfiltered"
+  if (!is.null(path) & !is.null(file_name)){
+    check_save_dea_data(markers = ge, path = path, filename = paste0(prefix, "-", file_name))
+  }
+  
+  prefix="filtered"
+  ge <- ge %>%
+    filter(p_val_adj < pcut & abs(avg_log2FC) > FCcut)
+  print(paste0("Filtering by adjusted pval cutoff: ", pcut))
+  print(paste0("and average log2FC cutoff: ", FCcut))
+  
+  if (rankbyPctDiff){
+    ge <- arrange(ge, desc(pct.diff))
+  }
   
   if (rankbyFC){
     ge <- arrange(ge, desc(avg_log2FC))
@@ -90,11 +126,8 @@ getNwriteDEG_df <- function(markers, path=NULL, file_name=NULL, pcut=1e-2, FCcut
   }
   
   if (!is.null(path) & !is.null(file_name)){
-    write.table(ge, 
-                file = file.path(merged_save_path, paste0(file_name, ".csv")),
-                sep = ",", 
-                row.names = F, 
-                quote = FALSE)
+    check_save_dea_data(markers = ge, path = path, 
+                        filename = paste0(prefix, "-", file_name))
   }
   return(ge)
 }
@@ -888,26 +921,6 @@ lm_eqn <- function(df){
                         b = format(unname(coef(m)[2]), digits = 2),
                         r2 = format(summary(m)$r.squared, digits = 3)))
   as.character(as.expression(eq));
-}
-
-
-check_save_dea_data <- function(markers, path, filename){
-  
-  if (file.exists(filename)) {
-    #Delete file if it exists
-    file.remove(filename)
-    write.table(markers, file = file.path(path,filename),
-                sep = ",",
-                append = F,
-                col.names=T, 
-                row.names = F)
-  }else{
-    write.table(markers, file = file.path(path,filename),
-                sep = ",",
-                append = F,
-                col.names=T, 
-                row.names = F)
-  }
 }
 
 
