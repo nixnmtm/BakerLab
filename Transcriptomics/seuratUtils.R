@@ -180,7 +180,7 @@ process_Seurat <- function(obj, npcs=20, dims=20, res=0.8){
     FindNeighbors(dims = 1:dims) %>%
     FindClusters(verbose = T, resolution = res) %>%
     RunUMAP(dims = 1:dims)# %>%
-    #RunTSNE(dims = 1:dims)
+  #RunTSNE(dims = 1:dims)
   return(obj)
 }
 
@@ -264,7 +264,7 @@ plotAverageExp_between_clusters <- function(obj, x_clus=NULL, y_clus=NULL,
                    ": ",
                    round(corr, 3))) +
     geom_text(x = 2.5, y = 0, label = lm_eqn(data), parse = TRUE)
- 
+  
   p1 <- LabelPoints(plot = p1, points = t, repel = TRUE, color="red")
   p1 <- LabelPoints(plot = p1, points = b, repel = TRUE, color="blue")
   p1 <- LabelPoints(plot = p1, points = rownames(high_in_both), repel = TRUE, color="green")
@@ -360,7 +360,7 @@ total_celltype_proportion <- function(sp.obj, assay_name = "predictions",
       Proportion = total_proportions,
       Percentage = paste0(round(total_proportions, 3)*100, "%")  # Convert to percentage for display
     )# %>%
-      #arrange(desc(Proportion))  # Arrange in descending order by proportion
+    #arrange(desc(Proportion))  # Arrange in descending order by proportion
     
     proportion_df$Label <- paste0(proportion_df$Percentage, "(",proportion_df$CellType,")")
     
@@ -416,7 +416,7 @@ run_GO_KEGGenrichment <- function(dea_markers, pcut=1e-2, FCcut=1, numCategory=1
   
   deg <- dea_markers %>% 
     as.data.frame() %>% rownames_to_column("gene") %>%
-  filter(p_val_adj < pcut, abs(avg_log2FC) > FCcut) %>%
+    filter(p_val_adj < pcut, abs(avg_log2FC) > FCcut) %>%
     arrange(p_val_adj)
   
   up <- deg[deg$avg_log2FC > 0,]$gene
@@ -518,10 +518,10 @@ run_GO_KEGGenrichment <- function(dea_markers, pcut=1e-2, FCcut=1, numCategory=1
                     color.params = list(foldChange = fc,
                                         category="black")) + ggtitle(paste0(prefix, "-",filename, "Upregulated_GO_ALL"))
     n2 <-  cnetplot(all.ls$downregulated, showCategory = numCategory,
-                  color.params = list(foldChange = fc,
-                                      category="black")) + ggtitle(paste0(prefix, "-",filename, "Downregulated_GO_ALL"))
-  save_it(n1+n2, savepath, paste0(paste0(filename, "_cnetplot-GO_ALL")),
-          format = "png", resolution=300, w=5000, h=5000)
+                    color.params = list(foldChange = fc,
+                                        category="black")) + ggtitle(paste0(prefix, "-",filename, "Downregulated_GO_ALL"))
+    save_it(n1+n2, savepath, paste0(paste0(filename, "_cnetplot-GO_ALL")),
+            format = "png", resolution=300, w=5000, h=5000)
   }
   
   #Biological Process
@@ -539,14 +539,14 @@ run_GO_KEGGenrichment <- function(dea_markers, pcut=1e-2, FCcut=1, numCategory=1
   })
   
   if (is_not_empty(bp.ls$upregulated) & is_not_empty(bp.ls$downregulated)){
-  n1 <-  cnetplot(bp.ls$upregulated, showCategory = numCategory,
-                  color.params = list(foldChange = fc,
-                                      category="black")) + ggtitle(paste0(prefix, "-",filename, "Upregulated_GO_BP"))
-  n2 <-  cnetplot(bp.ls$downregulated, showCategory = numCategory,
-                  color.params = list(foldChange = fc,
-                                      category="black")) + ggtitle(paste0(prefix, "-",filename, "Downregulated_GO_BP"))
-  save_it(n1+n2, savepath, paste0(filename, "_cnetplot-GO_BP"),
-          format = "png", resolution=300, w=8000, h=5000)
+    n1 <-  cnetplot(bp.ls$upregulated, showCategory = numCategory,
+                    color.params = list(foldChange = fc,
+                                        category="black")) + ggtitle(paste0(prefix, "-",filename, "Upregulated_GO_BP"))
+    n2 <-  cnetplot(bp.ls$downregulated, showCategory = numCategory,
+                    color.params = list(foldChange = fc,
+                                        category="black")) + ggtitle(paste0(prefix, "-",filename, "Downregulated_GO_BP"))
+    save_it(n1+n2, savepath, paste0(filename, "_cnetplot-GO_BP"),
+            format = "png", resolution=300, w=8000, h=5000)
   }
   
   # Molecular Function
@@ -563,14 +563,14 @@ run_GO_KEGGenrichment <- function(dea_markers, pcut=1e-2, FCcut=1, numCategory=1
   })
   
   if (is_not_empty(mf.ls$upregulated) & is_not_empty(mf.ls$downregulated)){
-  n3 <-  cnetplot(mf.ls$upregulated, showCategory = numCategory,
-                  color.params = list(foldChange = fc,
-                                      category="black")) + ggtitle(paste0(prefix, "-",filename, "Upregulated_GO_MF"))
-  n4 <-  cnetplot(mf.ls$downregulated, showCategory = numCategory,
-                  color.params = list(foldChange = fc,
-                                      category="black")) + ggtitle(paste0(prefix, "-",filename, "Downregulated_GO_MF"))
-  save_it(n3+n4, savepath, paste0(filename, "_cnetplot-GO_MF"),
-          format = "png", resolution=300, w=8000, h=5000)
+    n3 <-  cnetplot(mf.ls$upregulated, showCategory = numCategory,
+                    color.params = list(foldChange = fc,
+                                        category="black")) + ggtitle(paste0(prefix, "-",filename, "Upregulated_GO_MF"))
+    n4 <-  cnetplot(mf.ls$downregulated, showCategory = numCategory,
+                    color.params = list(foldChange = fc,
+                                        category="black")) + ggtitle(paste0(prefix, "-",filename, "Downregulated_GO_MF"))
+    save_it(n3+n4, savepath, paste0(filename, "_cnetplot-GO_MF"),
+            format = "png", resolution=300, w=8000, h=5000)
   }
   # Cellular Components
   cc.ls <- geneid.ls %>% map(~{
@@ -585,7 +585,7 @@ run_GO_KEGGenrichment <- function(dea_markers, pcut=1e-2, FCcut=1, numCategory=1
     return(eCC_GO)
   })
   
- if (is_not_empty(cc.ls$upregulated) & is_not_empty(cc.ls$downregulated)){
+  if (is_not_empty(cc.ls$upregulated) & is_not_empty(cc.ls$downregulated)){
     n5 <-  cnetplot(cc.ls$upregulated, showCategory = numCategory,
                     color.params = list(foldChange = fc,
                                         category="black")) + ggtitle(paste0(prefix, "-",filename, "Upregulated_GO_CC"))
@@ -594,7 +594,7 @@ run_GO_KEGGenrichment <- function(dea_markers, pcut=1e-2, FCcut=1, numCategory=1
                                         category="black ")) + ggtitle(paste0(prefix, "-",filename, "Downregulated_GO_CC"))
     save_it(n5+n6, savepath, paste0(filename, "_cnetplot-GO_CC"),
             format = "png", resolution=300, w=8000, h=5000)
- }
+  }
 }
 
 
@@ -891,7 +891,7 @@ seurat_to_spe <- function(seu, sample_id, img_id) {
     spatialCoords = spatialCoords,
     imgData = imgData
   )
-
+  
   # indicate all spots are on the tissue
   spe$in_tissue <- 1
   spe$sample_id <- sample_id
@@ -911,20 +911,20 @@ plotNget_genenames <- function(deconGexp, deconProp, posi,
     for(ensid in names(topgenesC)){
       if (print_it){
         (ens2gene_map[[ensid]])
-        }
+      }
       geneNames <- c(geneNames, ens2gene_map[[ensid]])
     }
   }else{
     if(print_it){
       print(names(topgenesC))
-      }
-    geneNames <- topgenesC
     }
+    geneNames <- topgenesC
+  }
   p <- vizTopic(theta = deconProp, pos = posi, topic = cluster_id, 
-           plotTitle = paste0("Topic",cluster_id),
-           size = 6, stroke = 0.5, alpha = 1,
-           low = "white",
-           high = "red")
+                plotTitle = paste0("Topic",cluster_id),
+                size = 6, stroke = 0.5, alpha = 1,
+                low = "white",
+                high = "red")
   if (!is.null(groups)){
     p1 <- vizAllTopics(deconProp, posi[rownames(deconProp),], r=55,
                        groups = groups, 
