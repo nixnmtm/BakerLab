@@ -403,6 +403,202 @@ total_celltype_proportion <- function(sp.obj, assay_name = "predictions",
   return(proportion_df)  # Return the calculated proportions
 }
 
+is_not_empty <- function(df) {
+  !is.null(df) && nrow(df) > 0
+}
+
+run_GO_KEGGenrichment <- function(dea_markers, pcut=1e-2, FCcut=1, numCategory=10, 
+                                  savepath=NULL, filename=NULL, prefix=NULL) {
+  
+  library(clusterProfiler)
+  library(enrichplot)
+  library(org.Mm.eg.db)
+  
+  deg <- dea_markers %>% 
+    as.data.frame() %>% rownames_to_column("gene") %>%
+  filter(p_val_adj < pcut, abs(avg_log2FC) > FCcut) %>%
+    arrange(p_val_adj)
+  
+  up <- deg[deg$avg_log2FC > 0,]$gene
+  down <- deg[deg$avg_log2FC < 0,]$gene
+  
+  gene.ls <- list(up, down)
+  names(gene.ls) <- c("upregulated", "downregulated")
+  
+  print(gene.ls)
+  
+  fc <- deg$avg_log2FC
+  names(fc) <- deg$gene
+  
+  geneid.ls <- gene.ls %>% map(~{
+    
+    # here for mouse
+    gene.df <- AnnotationDbi::select(org.Mm.eg.db,
+                                     keys = .x,
+                                     columns = c("ENTREZID", "SYMBOL"),
+                                     keytype = "SYMBOL")
+    
+    gene <- gene.df$ENTREZID
+    gene <- gene[which(!is.na(gene))]
+    gene <- unique(gene)
+    
+    return(gene)
+  })
+  
+  
+  compKEGG <- compareCluster(geneCluster   = geneid.ls,
+                             fun           = "enrichKEGG",
+                             pvalueCutoff  = 0.05,
+                             pAdjustMethod = "BH",
+                             organism = "mmu")
+  
+  
+  ALL_GO <- compareCluster(geneCluster   = geneid.ls,
+                           fun           = "enrichGO",
+                           pvalueCutoff  = 0.05,
+                           pAdjustMethod = "BH",
+                           OrgDb = org.Mm.eg.db,
+                           ont = 'ALL')
+  
+  BP_GO <- compareCluster(geneCluster   = geneid.ls,
+                          fun           = "enrichGO",
+                          pvalueCutoff  = 0.05,
+                          pAdjustMethod = "BH",
+                          OrgDb = org.Mm.eg.db,
+                          ont = 'BP')
+  
+  CC_GO <- compareCluster(geneCluster   = geneid.ls,
+                          fun           = "enrichGO",
+                          pvalueCutoff  = 0.05,
+                          pAdjustMethod = "BH",
+                          OrgDb = org.Mm.eg.db,
+                          ont = 'CC')
+  MF_GO <- compareCluster(geneCluster   = geneid.ls,
+                          fun           = "enrichGO",
+                          pvalueCutoff  = 0.05,
+                          pAdjustMethod = "BH",
+                          OrgDb = org.Mm.eg.db,
+                          ont = 'MF')
+  
+  
+  ## dot plot
+  g0 <- dotplot(ALL_GO, showCategory = 20, title = paste0(prefix, "-", filename, "-ALL_GO_Enrichment"), font.size = 16)
+  save_it(g0, savepath, paste0(paste0(filename, "-enrichALL_GO")),
+          format = "png", resolution=300, w=8000, h=5000)  
+  
+  g1 <- dotplot(BP_GO, showCategory = numCategory, title = paste0(prefix, "-",filename, "-BP_GO_Enrichment"), font.size = 16)
+  g2 <- dotplot(CC_GO, showCategory = numCategory, title = paste0(prefix, "-",filename, "-CC_GO_Enrichment"), font.size = 16)
+  g3 <- dotplot(MF_GO, showCategory = numCategory, title = paste0(prefix, "-",filename, "-MF_GO_Enrichment"), font.size = 16)
+  
+  save_it(g1+g2+g3, savepath, paste0(paste0(filename, "-enrichGO")),
+          format = "png", resolution=300, w=8000, h=3000)
+  
+  g4 <- dotplot(compKEGG, showCategory = numCategory, title = paste0(prefix, "-",filename, "-KEGG Pathway Enrichment Analysis"))
+  save_it(g4, savepath, paste0(filename, "-enrichKEGG"),
+          format = "png", resolution=300, w=2000, h=5000)
+  
+  
+  # CNET PLot
+  
+  # all
+  all.ls <- geneid.ls %>% map(~{
+    
+    eALL_GO <- enrichGO(
+      gene          = .x,
+      OrgDb         = org.Mm.eg.db,
+      ont           = "ALL",
+      pAdjustMethod = "BH",
+      pvalueCutoff  = 0.05,
+      readable      = TRUE
+    )
+    return(eALL_GO)
+  })
+  if (is_not_empty(all.ls$upregulated) & is_not_empty(all.ls$downregulated)){
+    n1 <-  cnetplot(all.ls$upregulated, showCategory = numCategory,
+                    color.params = list(foldChange = fc,
+                                        category="black")) + ggtitle(paste0(prefix, "-",filename, "Upregulated_GO_ALL"))
+    n2 <-  cnetplot(all.ls$downregulated, showCategory = numCategory,
+                  color.params = list(foldChange = fc,
+                                      category="black")) + ggtitle(paste0(prefix, "-",filename, "Downregulated_GO_ALL"))
+  save_it(n1+n2, savepath, paste0(paste0(filename, "_cnetplot-GO_ALL")),
+          format = "png", resolution=300, w=5000, h=5000)
+  }
+  
+  #Biological Process
+  bp.ls <- geneid.ls %>% map(~{
+    
+    eBP_GO <- enrichGO(
+      gene          = .x,
+      OrgDb         = org.Mm.eg.db,
+      ont           = "BP",
+      pAdjustMethod = "BH",
+      pvalueCutoff  = 0.05,
+      readable      = TRUE
+    )
+    return(eBP_GO)
+  })
+  
+  if (is_not_empty(bp.ls$upregulated) & is_not_empty(bp.ls$downregulated)){
+  n1 <-  cnetplot(bp.ls$upregulated, showCategory = numCategory,
+                  color.params = list(foldChange = fc,
+                                      category="black")) + ggtitle(paste0(prefix, "-",filename, "Upregulated_GO_BP"))
+  n2 <-  cnetplot(bp.ls$downregulated, showCategory = numCategory,
+                  color.params = list(foldChange = fc,
+                                      category="black")) + ggtitle(paste0(prefix, "-",filename, "Downregulated_GO_BP"))
+  save_it(n1+n2, savepath, paste0(filename, "_cnetplot-GO_BP"),
+          format = "png", resolution=300, w=8000, h=5000)
+  }
+  
+  # Molecular Function
+  mf.ls <- geneid.ls %>% map(~{
+    eMF_GO <- enrichGO(
+      gene          = .x,
+      OrgDb         = org.Mm.eg.db,
+      ont           = "MF",
+      pAdjustMethod = "BH",
+      pvalueCutoff  = 0.05,
+      readable      = TRUE
+    )
+    return(eMF_GO)
+  })
+  
+  if (is_not_empty(mf.ls$upregulated) & is_not_empty(mf.ls$downregulated)){
+  n3 <-  cnetplot(mf.ls$upregulated, showCategory = numCategory,
+                  color.params = list(foldChange = fc,
+                                      category="black")) + ggtitle(paste0(prefix, "-",filename, "Upregulated_GO_MF"))
+  n4 <-  cnetplot(mf.ls$downregulated, showCategory = numCategory,
+                  color.params = list(foldChange = fc,
+                                      category="black")) + ggtitle(paste0(prefix, "-",filename, "Downregulated_GO_MF"))
+  save_it(n3+n4, savepath, paste0(filename, "_cnetplot-GO_MF"),
+          format = "png", resolution=300, w=8000, h=5000)
+  }
+  # Cellular Components
+  cc.ls <- geneid.ls %>% map(~{
+    eCC_GO <- enrichGO(
+      gene          = .x,
+      OrgDb         = org.Mm.eg.db,
+      ont           = "CC",
+      pAdjustMethod = "BH",
+      pvalueCutoff  = 0.05,
+      readable      = TRUE
+    )
+    return(eCC_GO)
+  })
+  
+ if (is_not_empty(cc.ls$upregulated) & is_not_empty(cc.ls$downregulated)){
+    n5 <-  cnetplot(cc.ls$upregulated, showCategory = numCategory,
+                    color.params = list(foldChange = fc,
+                                        category="black")) + ggtitle(paste0(prefix, "-",filename, "Upregulated_GO_CC"))
+    n6 <-  cnetplot(cc.ls$downregulated, showCategory = numCategory,
+                    color.params = list(foldChange = fc,
+                                        category="black ")) + ggtitle(paste0(prefix, "-",filename, "Downregulated_GO_CC"))
+    save_it(n5+n6, savepath, paste0(filename, "_cnetplot-GO_CC"),
+            format = "png", resolution=300, w=8000, h=5000)
+ }
+}
+
+
+
 ####SPATA utils#### 
 convert2Seurat <- function (spata_obj, image_path){
   # convert a Spata object into seurat
