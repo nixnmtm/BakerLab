@@ -132,6 +132,18 @@ getNwriteDEG_df <- function(markers, path=NULL, file_name=NULL, pcut=1e-2, FCcut
   return(ge)
 }
 
+# Function to exclude reads from cells with given UMIs > 1000
+remove_contaminated_spots <- function(obj, genes2check, umi_count_cutoff=1000){
+  
+  obj$UMI_counts <- Matrix::colSums(GetAssayData(obj, 
+                                                     assay = "Spatial", 
+                                                     layer = "counts")[genes2check, , drop = FALSE])
+  # Remove cells/spots with > 1000 UMIs of given genes
+  obj <- subset(obj, subset = UMI_counts <= umi_count_cutoff)
+  return(obj)
+}
+
+
 # Function to remove unwanted genes from a Seurat object
 remove_unwanted_genes <- function(obj) {
   # Define lists of genes to remove
