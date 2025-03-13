@@ -391,7 +391,9 @@ plot_diff_count <- function(diff_genes_list_table, plot_coding=T, fontsize=16){
 sig_genes_plot <- function(results, baseMean_cutoff=50, lFC_cutoff=0.58, padj_cutoff=0.05) {
 
   results <- as.data.frame(results)
-  results <- results[results["baseMean"] > baseMean_cutoff,]
+  if(!is.null(baseMean_cutoff)){
+    results <- results[results["baseMean"] > baseMean_cutoff,]
+  }
   results$calls <- 0
   results$calls[which(results$log2FoldChange > lFC_cutoff
                         & results$padj < padj_cutoff)] <- 1
