@@ -135,26 +135,49 @@ getNwriteDEG_df <- function(markers, path=NULL, file_name=NULL, pcut=1e-2, FCcut
 getDEA_plotVP <- function(object, setIdent=NULL, ident1=NULL, ident2=NULL, 
                       pcutoff=1e-2, FCcutoff=1,
                       filename=NULL, filepath=NULL,
-                      plotFDR=F){
+                      plotFDR=F,
+                      connectors=F){
   
   Idents(object) <- object[[setIdent, drop=T]]
   markers <- FindMarkers(object, ident.1 = ident1, ident.2= ident2)
   markers$p_val_adj_fdr <- p.adjust(markers$p_val, method='fdr')
   markers <- markers %>% as.data.frame() %>% rownames_to_column("gene")
   
+  keyvals <- rep("gray35", nrow(markers))  # Default color
+  
+  if (plotFDR){
+    y = "p_val_adj_fdr"
+    dir.create(file.path(filepath, "FDR"), recursive = TRUE)
+    filepath <- file.path(filepath, "FDR")
+    filename = paste0(filename, "_FDR")
+    keyvals[markers$avg_log2FC > FCcutoff & 
+              markers$p_val_adj_fdr < pcutoff] <- "firebrick1"
+    keyvals[markers$avg_log2FC < -FCcutoff & 
+              markers$p_val_adj_fdr < pcutoff] <- "royalblue"
+    
+  }else{
+    y = "p_val_adj"
+    keyvals[markers$avg_log2FC > FCcutoff & 
+              markers$p_val_adj < pcutoff] <- "firebrick1"
+    keyvals[markers$avg_log2FC < -FCcutoff & 
+              markers$p_val_adj < pcutoff] <- "royalblue"
+  }
+  
+  
   getNwriteDEG_df(markers, path=filepath, file_name=filename, 
                   pcut=pcutoff, FCcut=FCcutoff, 
                   rankbyFC=F,rankbyPval=T,
                   rankbyAdjPval=F,rankbyPctDiff=F)
   
-  suptitle = paste0(filename,
-                    "\nPositive LogFC indicate ",ident1," is upregulated relative to ",ident2)
+  suptitle = paste0("The dotted lines indicate","\n",
+                    "Pval cutoff: ", pcutoff, "\n",
+                    "FoldChange cutoff: ", FCcutoff)
   
-  if (plotFDR){
-    y = "p_val_adj_fdr"
-  }else{
-    y = "p_val_adj"
-  }
+  
+  keyvals[is.na(keyvals)] <- 'gray35'
+  names(keyvals)[keyvals == "royalblue"] <- paste0("Down-regulated","\n", ident2)
+  names(keyvals)[keyvals == "firebrick1"] <- paste0("Up-regulated", "\n", ident1)
+  names(keyvals)[keyvals == "gray35"] <- "NS"
   
   p <- EnhancedVolcano(markers,
                        lab=markers$gene,
@@ -166,22 +189,18 @@ getDEA_plotVP <- function(object, setIdent=NULL, ident1=NULL, ident2=NULL,
                        pCutoffCol = y,
                        pCutoff = pcutoff,
                        xlab = bquote('Average' ~Log[2]~ 'fold change'),
-                       labSize = 5.0,
-                       pointSize = 3,
+                       labSize = 4.0,
+                       pointSize = 4,
                        colAlpha = 0.8,
                        legendLabSize = 12,
                        legendIconSize = 2.0,
                        widthConnectors = 0.75,
-                       gridlines.major = F,
-                       gridlines.minor = F,
-                       drawConnectors = T,
-                       max.overlaps=20)
-  save_it(p, int_save_path, paste0("VP-", filename, "_pcut-", pcutoff,"_FCcut-", FCcutoff),
+                       drawConnectors = connectors, arrowheads = F,
+                       max.overlaps=10, colCustom = keyvals)
+  save_it(p, filepath, paste0("VP-", filename, "_pcut-", pcutoff,"_FCcut-", FCcutoff),
           format = "png", resolution=300, w=4000, h=4000)
   return(markers)
 }
-
-
 
 # Function to exclude reads from cells with given UMIs > 1000
 remove_contaminated_spots <- function(obj, genes2check, umi_count_cutoff=1000){
