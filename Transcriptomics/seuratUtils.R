@@ -42,7 +42,7 @@ plot_ComplexHeatMap <- function(obj, markers, metadata_cluster_colname=NULL) {
   
   Seurat::PurpleAndYellow()
   ## make the black color map to 0. the yellow map to highest and the purle map to the lowest
-  col_fun = circlize::colorRamp2(c(-1, 0, 2), c("#FF00FF", "black", "#FFFF00"))
+  col_fun = circlize::colorRamp2(c(-1, 0, 2), c("blue", "gray", "red"))
   
   library(ComplexHeatmap)
   Heatmap(mat, name = "Expression",  
@@ -136,10 +136,21 @@ getDEA_plotVP <- function(object, setIdent=NULL, ident1=NULL, ident2=NULL,
                       pcutoff=1e-2, FCcutoff=1,
                       filename=NULL, filepath=NULL,
                       plotFDR=F,
-                      connectors=F){
-  
-  Idents(object) <- object[[setIdent, drop=T]]
-  markers <- FindMarkers(object, ident.1 = ident1, ident.2= ident2)
+                      connectors=F, subset_ident=NULL, test="wilcox"){
+
+  if (is.null(subset_ident)){
+    Idents(object) <- object[[setIdent, drop=T]]
+    print(levels(object@active.ident))
+    markers <- FindMarkers(object, ident.1 = ident1, ident.2= ident2,
+                           test.use=test)
+  }else{
+    print(levels(object@active.ident))
+    print(paste0("Subsetting based on cluster-", subset_ident))
+    markers <- FindMarkers(object, ident.1 = ident1, ident.2= ident2, 
+                           subset.ident=subset_ident, group_by=setIdent,
+                           test.use=test)
+    print(head(markers))
+  }
   markers$p_val_adj_fdr <- p.adjust(markers$p_val, method='fdr')
   markers <- markers %>% as.data.frame() %>% rownames_to_column("gene")
   
@@ -157,6 +168,9 @@ getDEA_plotVP <- function(object, setIdent=NULL, ident1=NULL, ident2=NULL,
     
   }else{
     y = "p_val_adj"
+    dir.create(file.path(filepath, "noFDR"), recursive = TRUE)
+    filepath <- file.path(filepath, "noFDR")
+    filename = paste0(filename, "_noFDR")
     keyvals[markers$avg_log2FC > FCcutoff & 
               markers$p_val_adj < pcutoff] <- "firebrick1"
     keyvals[markers$avg_log2FC < -FCcutoff & 
@@ -527,14 +541,14 @@ run_GO_KEGGenrichment <- function(dea_markers, pcut=1e-2, FCcut=1, numCategory=1
     return(gene)
   })
   
-  
+  # ---- Run KEGG ----
   compKEGG <- compareCluster(geneCluster   = geneid.ls,
                              fun           = "enrichKEGG",
                              pvalueCutoff  = 0.05,
                              pAdjustMethod = "BH",
                              organism = "mmu")
   
-  
+  # ---- Run GO ----
   ALL_GO <- compareCluster(geneCluster   = geneid.ls,
                            fun           = "enrichGO",
                            pvalueCutoff  = 0.05,
@@ -562,7 +576,7 @@ run_GO_KEGGenrichment <- function(dea_markers, pcut=1e-2, FCcut=1, numCategory=1
                           OrgDb = org.Mm.eg.db,
                           ont = 'MF')
   
-  
+  # ---- Dot plot ----
   ## dot plot
   g0 <- dotplot(ALL_GO, showCategory = 20, title = paste0(prefix, "-", filename, "-ALL_GO_Enrichment"), font.size = 16)
   save_it(g0, savepath, paste0(paste0(filename, "-enrichALL_GO")),
@@ -580,7 +594,7 @@ run_GO_KEGGenrichment <- function(dea_markers, pcut=1e-2, FCcut=1, numCategory=1
           format = "png", resolution=300, w=2000, h=5000)
   
   
-  # CNET PLot
+  # ---- CNET plot ----
   
   # all
   all.ls <- geneid.ls %>% map(~{
@@ -678,6 +692,116 @@ run_GO_KEGGenrichment <- function(dea_markers, pcut=1e-2, FCcut=1, numCategory=1
             format = "png", resolution=300, w=8000, h=5000)
   }
 }
+
+run_integration_analysis <- function(obj, integration, result_path, res = 2, fcut = 1, pcut = 0.05, cols=NULL) {
+  library(Seurat)
+  library(dplyr)
+  library(ggplot2)
+  library(patchwork)
+  library(ComplexHeatmap)
+  library(EnhancedVolcano)
+    
+    # ---- Step 1: Integration and Clustering ----
+    obj <- FindNeighbors(obj, reduction = integration, dims = 1:30)
+    obj <- FindClusters(obj, resolution = res, cluster.name = paste0(integration, "_clusters"))
+    obj <- RunUMAP(obj, dims = 1:30, reduction = integration, reduction.name = paste0("umap.", integration))
+    obj <- RunTSNE(obj, dims = 1:30, reduction = integration, reduction.name = paste0("tsne.", integration))
+    obj <- JoinLayers(obj)
+    
+    # ---- Step 2: Define Colors ----
+    if (!is.null(cols)){
+      color.use <- cols 
+      names(color.use) <- levels(obj)
+    }else{
+      color.use=NULL
+    }
+    
+    # ---- Step 3: Dimensionality Reduction Plots ----
+    p1 <- DimPlot(obj, reduction = paste0("umap.", integration), group.by = paste0(integration, "_clusters"),
+                  combine = FALSE, label.size = 2, cols = color.use)
+    p2 <- SpatialDimPlot(obj, pt.size.factor = 10, group.by = paste0(integration, "_clusters"),
+                         combine = FALSE, label.size = 2, cols = color.use)
+    
+    wrapped_plot <- wrap_plots(c(p1, p2), ncol = 2, byrow = FALSE)
+    
+    # ---- Step 4: Create Directory for Results ----
+    integration_save_path <- file.path(result_path, paste0(integration))
+    dir.create(integration_save_path, recursive = TRUE)
+    
+    # Save wrapped plot
+    save_it(wrapped_plot, integration_save_path, paste0(integration, "_res", res, "_UMAP_Spatial"), 
+            format = "png", resolution = 300, w = 3000, h = 5000)
+
+    # ---- Step 5: Identify Cluster Markers ----
+    markers <- FindAllMarkers(obj) %>%
+      mutate(pct.diff = pct.1 - pct.2) %>%
+      group_by(cluster)
+    
+    # ---- Step 6: Extract and Print Top 5 Markers per Cluster ----
+    top5 <- markers %>%
+      group_by(cluster) %>%
+      dplyr::filter(abs(avg_log2FC) > 1 & p_val_adj < 0.05) %>%
+      slice_head(n = 5) %>%
+      ungroup()
+    
+    print(top5)  # Print top 5 markers in the console
+    
+    # Save top 5 markers as CSV
+    write.csv(top5, file = file.path(integration_save_path, paste0(integration, "_res", res, "_Top5Markers.csv")))
+    
+    # ---- Step 7: Plot Complex Heatmap ----
+    hm <- plot_ComplexHeatMap(obj, markers = top5, metadata_cluster_colname = paste0(integration, "_clusters"))
+    save_it(hm, integration_save_path, paste0(integration, "_res", res,"_HeatMap"), 
+            format = "png", resolution = 300, w = 3000, h = 5000)
+    
+    # ---- Step 8: Volcano Plots and DEG Export ----
+    clusters <- unique(markers$cluster)
+    
+    for (i in clusters) {
+      dea_clus <- markers[markers$cluster == i, ]
+      suptitle <- paste0("Cluster ", i, " vs Others")
+      
+      p <- EnhancedVolcano(
+        dea_clus,
+        lab = dea_clus$gene,
+        title = "Integrated Bladders",
+        subtitle = suptitle,
+        x = 'avg_log2FC',
+        y = 'p_val_adj',
+        FCcutoff = fcut,
+        ylab = "p_val_adj",
+        pCutoffCol = 'p_val_adj',
+        pCutoff = pcut,
+        xlab = bquote('Average' ~ Log[2] ~ 'fold change'),
+        labSize = 5.0,
+        pointSize = 3,
+        colAlpha = 0.8,
+        legendLabSize = 12,
+        legendIconSize = 2.0,
+        widthConnectors = 0.75,
+        gridlines.major = FALSE,
+        gridlines.minor = FALSE,
+        drawConnectors = TRUE,
+        max.overlaps = 20
+      )
+      
+      save_it(p, integration_save_path, paste0(integration, "_res", res, "_Cluster", i, "vsOthers"), 
+              format = "png", resolution = 300, w = 3000, h = 5000)
+      
+      # ---- Step 9: Filter DEGs and Save CSV ----
+      filtered_dea <- markers %>%
+        filter(avg_log2FC > 1, p_val_adj < 1e-2, cluster == i)
+      
+      write.csv(
+        x = filtered_dea,
+        file = file.path(integration_save_path, 
+                         paste0("Filtered_", integration, "_res", res, "_Cluster", i, "vsOthers", "_DEG.csv"))
+      )
+    }
+  return(obj)
+}
+
+
 
 # barplot_cell_proportion
 # Cell_proportion
@@ -1678,6 +1802,65 @@ Barplot_Cell_Proportion = function(seurat_object,
     }
   }
 }
+
+addSmallLegend <- function(pointSize = 0.5, textSize = 3, spaceLegend = 0.1) {
+  # Reduces the font size of legend and the size of dots in the legend
+  list(guides(
+    shape = guide_legend(override.aes = list(size = pointSize)),
+    color = guide_legend(override.aes = list(size = pointSize))
+  ),
+  theme(
+    legend.title = element_text(size = textSize),
+    legend.text = element_text(size = textSize),
+    legend.key.size = unit(spaceLegend, "lines")
+  ))
+}
+
+
+#' Modified from https://github.com/mojaveazure/seurat-disk/issues/172
+#' Patch of SeuratDisk::SaveH5Seurat function
+#'
+#' The "Assay5" class attribute "RNA" needs to be converted to a standard "Assay"
+#' class for compatibility with SeuratDisk. 
+#'
+#' @param object the Seurat object
+#' @param filename the file path where to save the Seurat object
+#' @param verbose SaveH5Seurat verbosity
+#' @param overwrite whether to overwrite an existing file
+#' 
+#' @return NULL
+SaveH5SeuratSpatialObject <- function(
+    object,
+    dims=30,
+    filename,
+    verbose = TRUE,
+    overwrite = TRUE
+) {
+  
+  object <- object %>%
+    NormalizeData() %>%
+    FindVariableFeatures() %>%
+    ScaleData() %>%
+    RunPCA(npcs=dims) %>%
+    RunUMAP(dims = 1:dims) 
+  
+  # add copy of "RNA" 
+  object[["RNA"]] <- CreateAssayObject(counts = object[["Spatial"]]$counts)
+  object@reductions$pca@cell.embeddings <- as.matrix(object@reductions$pca@cell.embeddings)
+  object@reductions$umap@cell.embeddings <- as.matrix(object@reductions$umap@cell.embeddings)
+  
+  object@images[["slice1"]] <- object@images[["slice1"]]
+  
+  # switch default assay
+  DefaultAssay(object) <- "RNA"
+  # remove original
+  #object[["RNA"]] <- NULL
+  # export
+  SaveH5Seurat(object, filename = filename, overwrite, verbose)
+  
+  return(NULL)
+}
+
 
 ####SPATA utils#### 
 convert2Seurat <- function (spata_obj, image_path){
