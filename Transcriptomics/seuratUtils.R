@@ -136,19 +136,18 @@ getDEA_plotVP <- function(object, setIdent=NULL, ident1=NULL, ident2=NULL,
                       pcutoff=1e-2, FCcutoff=1,
                       filename=NULL, filepath=NULL,
                       plotFDR=F,
-                      connectors=F, subset_ident=NULL, test="wilcox"){
+                      connectors=F, subset_ident=NULL){
 
   if (is.null(subset_ident)){
-    Idents(object) <- object[[setIdent, drop=T]]
-    print(levels(object@active.ident))
-    markers <- FindMarkers(object, ident.1 = ident1, ident.2= ident2,
-                           test.use=test)
+    #Idents(object) <- object[[setIdent, drop=T]]
+    Idents(object) <- setIdent
+    print(object)
+    print(levels(object))
+    markers <- FindMarkers(object, ident.1 = ident1, ident.2= ident2)
   }else{
-    print(levels(object@active.ident))
     print(paste0("Subsetting based on cluster-", subset_ident))
     markers <- FindMarkers(object, ident.1 = ident1, ident.2= ident2, 
-                           subset.ident=subset_ident, group_by=setIdent,
-                           test.use=test)
+                           subset.ident=subset_ident, group_by=setIdent)
     print(head(markers))
   }
   markers$p_val_adj_fdr <- p.adjust(markers$p_val, method='fdr')
