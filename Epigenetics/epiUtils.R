@@ -1,4 +1,53 @@
-#### filter_high_conf_tfbs ####
+#### Functions-TFBS Analysis####
+
+library(ggplot2)
+library(dplyr)
+
+#' Filter High Confidence Transcription Factor Binding Sites
+#'
+#' This function filters transcription factor (TF) binding sites (TFBS) based on score thresholds,
+#' minimum number of hits per TF, and optional motif clustering. It also prioritizes TFs using a weighted
+#' scoring system that considers both motif strength and clustering density.
+#'
+#' @param df A data frame containing motif search results. Must include columns: TF_name, adjusted_start, absScore.
+#' @param absScore_cutoff Numeric. Minimum absolute score threshold for filtering motifs (default = 10).
+#' @param min_hits Integer. Minimum number of binding sites required per TF to be considered (default = 5).
+#' @param cluster Logical. Whether to consider clustering of TF motifs based on their genomic spacing (default = TRUE).
+#' @param max_avg_dist Numeric. Maximum average distance between TF binding sites to consider a cluster tight (default = 1000).
+#' @param focus_tfs Character vector. Optional. A list of specific TFs to retain after filtering.
+#' @param Plot Logical. Whether to generate a summary barplot of top TFs (default = TRUE).
+#' @param top_n_plot Integer. Number of top TFs to plot in the barplot (default = 30).
+#' @param label_top_n Integer. Number of top TFs to annotate with labels in the plot (default = 5).
+#' @param sort_by Character. How to rank TFs for plotting. Options: "weighted_score", "max_absScore", "mean_absScore" (default = "weighted_score").
+#'
+#' @return A filtered and prioritized data frame of TFs with calculated metrics:
+#' \itemize{
+#'   \item \code{avg_dist}: Average distance between binding sites
+#'   \item \code{n_hits}: Number of hits per TF
+#'   \item \code{mean_absScore}: Mean absolute score per TF
+#'   \item \code{max_absScore}: Maximum absolute score per TF
+#'   \item \code{cluster_class}: Cluster type based on spacing (Tight, Medium, Loose, Unknown)
+#'   \item \code{weighted_score}: Priority score combining binding strength, clustering, and hit count
+#' }
+#'
+#' @details
+#' The function applies the following workflow:
+#' \enumerate{
+#'   \item Filter motifs above a minimum absScore.
+#'   \item Retain TFs with sufficient number of hits (min_hits).
+#'   \item Calculate motif density (average distance between motifs).
+#'   \item Penalize loosely clustered TFs when calculating the weighted_score.
+#'   \item Optionally plot the top TFs and label the strongest ones.
+#' }
+#'
+#' Useful for identifying likely regulatory TFs in custom genome regions (e.g., after large genomic insertions or deletions).
+#'
+#' @examples
+#' \dontrun{
+#' result <- filter_high_conf_tfbs(all_hits_df, absScore_cutoff = 10, min_hits = 5)
+#' }
+#'
+#' @export
 filter_high_conf_tfbs <- function(df,
                                   absScore_cutoff = 10, 
                                   min_hits = 5, 
@@ -9,9 +58,6 @@ filter_high_conf_tfbs <- function(df,
                                   top_n_plot = 30,
                                   label_top_n = 5, 
                                   sort_by="weighted_score") {
-  
-  library(dplyr)
-  library(ggplot2)
   
   # Step 1: Score-based filtering
   df_filtered <- df %>%
@@ -81,8 +127,9 @@ filter_high_conf_tfbs <- function(df,
     
     # Format to paste the top Tfs into GXD (https://www.informatics.jax.org/expression.shtml)
     # Collapse into a single comma-separated string
-    tf_list_string <- tf_density[1:top_n_plot,]$TF_name %>% paste(collapse = ",")
-    cat(tf_list_string)
+    tf_list_string <- tf_density_top$TF_name %>% paste(collapse = ",")
+    print(tf_list_string)
+    #cat(tf_list_string)
     
     # Identify top N TFs for labeling
     top_labels <- tf_density_top %>%
@@ -102,7 +149,7 @@ filter_high_conf_tfbs <- function(df,
         "Loose Cluster" = "#66B2FF",     # Blue
         "Unknown" = "grey"
       )) +
-      labs(title = "Top Prioritized TFs (High Confidence)",
+      labs(title = paste0("Top Prioritized TFs (High Confidence)-filtered_by-", sort_by),
            x = "TF Name", y = "Weighted Score",
            fill = "Cluster Type") +
       theme_minimal() +
@@ -115,12 +162,8 @@ filter_high_conf_tfbs <- function(df,
     print(p)
   }
   
-  return(tf_density)
+  return(tf_density_top)
 }
-
-
-library(ggplot2)
-library(dplyr)
 
 plot_tf_counts_comparison <- function(filtered_df, clustered_df) {
   # Count TF hits
