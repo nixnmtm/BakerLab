@@ -57,7 +57,8 @@ filter_high_conf_tfbs <- function(df,
                                   Plot = TRUE,
                                   top_n_plot = 30,
                                   label_top_n = 5, 
-                                  sort_by="weighted_score") {
+                                  sort_by="weighted_score",
+                                  fontsize=8) {
   
   # Step 1: Score-based filtering
   df_filtered <- df %>%
@@ -142,7 +143,7 @@ filter_high_conf_tfbs <- function(df,
       geom_col() +
       coord_flip() +
       geom_text(aes(label = ifelse(TF_name %in% top_labels, TF_name, "")),
-                hjust = -0.1, size = 4, color = "black", fontface = "bold") +
+                hjust = -0.1, size = fontsize/2, color = "black", fontface = "bold") +
       scale_fill_manual(values = c(
         "Tight Cluster" = "#FF5C5C",     # Red
         "Medium Cluster" = "#FFB84D",    # Orange
@@ -153,7 +154,7 @@ filter_high_conf_tfbs <- function(df,
            x = "TF Name", y = "Weighted Score",
            fill = "Cluster Type") +
       theme_minimal() +
-      theme(axis.text = element_text(size = 8),
+      theme(axis.text = element_text(size = fontsize),
             axis.title = element_text(size = 14),
             plot.title = element_text(size = 16, face = "bold"),
             legend.position = "bottom") +
