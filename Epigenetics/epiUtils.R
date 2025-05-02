@@ -196,6 +196,25 @@ plot_tf_counts_comparison <- function(filtered_df, clustered_df) {
     theme_minimal()
 }
 
+bar_plot_motif_count <- function(motif_df){
+  
+  ## Count motifs per TF and plot as a stacked barplot
+  
+  motif_count_plot <- motif_df %>%
+    group_by(TF_name) %>%
+    summarise(n_hits = n()) %>%
+    arrange(desc(n_hits))
+  
+  ggplot(motif_count_plot, aes(x = reorder(TF_name, n_hits), y = n_hits, fill = TF_name)) +
+    geom_bar(stat = "identity", show.legend = FALSE) +
+    coord_flip() +
+    labs(title = "Motif Count per TF",
+         x = "Transcription Factor", y = "Number of Motif Hits") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(size = 8), axis.text.y = element_text(size = 10))
+}
+
+
 plot_tf_heatmap <- function(df, bin_size = 500, return_summary = TRUE) {
   library(dplyr)
   library(ggplot2)
