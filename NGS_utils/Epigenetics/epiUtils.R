@@ -92,6 +92,7 @@ filter_high_conf_tfbs <- function(df,
       weighted_score = (mean_absScore * cluster_penalty) * log2(n_hits + 1)
     )
   
+
   # Add dynamic cluster classes
   tf_density <- tf_density %>%
     mutate(
@@ -109,7 +110,7 @@ filter_high_conf_tfbs <- function(df,
       filter(TF_name %in% focus_tfs)
   }
   
-  # Plotting
+  # Plotting optionally
   if (Plot) {
     if (sort_by == "weighted_score"){
       tf_density_top <- tf_density %>%
@@ -128,6 +129,9 @@ filter_high_conf_tfbs <- function(df,
     
     # Format to paste the top Tfs into GXD (https://www.informatics.jax.org/expression.shtml)
     # Collapse into a single comma-separated string
+    
+    ### WARNING - Make sure you know what you are doing ###
+    # The results are going to be completely biased based on the keywords
     tf_list_string <- tf_density_top$TF_name %>% paste(collapse = ",")
     print(tf_list_string)
     #cat(tf_list_string)
