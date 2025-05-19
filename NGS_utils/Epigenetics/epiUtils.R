@@ -60,17 +60,17 @@ filter_high_conf_tfbs <- function(df,
                                   sort_by="weighted_score",
                                   fontsize=8) {
   
-  # Step 1: Score-based filtering
+  # Score-based filtering
   df_filtered <- df %>%
     filter(absScore >= absScore_cutoff)
   
-  # Step 2: TFs with sufficient hits
+  # TFs with sufficient hits
   tf_counts <- df_filtered %>%
     group_by(TF_name) %>%
     filter(n() >= min_hits) %>%
     ungroup()
   
-  # Step 3: Clustering analysis
+  # Clustering analysis
   tf_density <- tf_counts %>%
     group_by(TF_name) %>%
     summarise(
@@ -81,7 +81,7 @@ filter_high_conf_tfbs <- function(df,
       .groups = "drop"
     )
   
-  # Step 4: Priority scoring
+  # Priority scoring
   tf_density <- tf_density %>%
     mutate(
       cluster_penalty = ifelse(
@@ -92,7 +92,7 @@ filter_high_conf_tfbs <- function(df,
       weighted_score = (mean_absScore * cluster_penalty) * log2(n_hits + 1)
     )
   
-  # Step 5: Add dynamic cluster classes
+  # Add dynamic cluster classes
   tf_density <- tf_density %>%
     mutate(
       cluster_class = case_when(
@@ -103,13 +103,13 @@ filter_high_conf_tfbs <- function(df,
       )
     ) %>% arrange(desc(weighted_score))
   
-  # Step 6: Focus on specific TFs if requested
+  # Focus on specific TFs if requested
   if (!is.null(focus_tfs)) {
     tf_density <- tf_density %>% 
       filter(TF_name %in% focus_tfs)
   }
   
-  # Step 7: Optional plotting
+  # Plotting
   if (Plot) {
     if (sort_by == "weighted_score"){
       tf_density_top <- tf_density %>%
