@@ -9,6 +9,10 @@ from matplotlib import gridspec
 import seaborn as sns
 import os.path as path
 import scipy.stats as stats
+import logging
+
+import requests
+import json
 
 """
 # esm-variants for missense
@@ -16,6 +20,19 @@ https://huggingface.co/spaces/ntranoslab/esm_variants/blob/main/app.py
 # for indels use the tutorial below
 https://github.com/ntranoslab/esm-variants/blob/main/esm_variants_utils.ipynb
 """ 
+
+# for logging
+def setup_logger(name="variant_logger", level="INFO"):
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        level = getattr(logging, level.upper(), logging.INFO)
+        logger.setLevel(level)
+        ch = logging.StreamHandler()
+        ch.setLevel(level)
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        ch.setFormatter(formatter)
+        logger.addHandler(ch)
+    return logger
 
 # This function is modified from 
 # https://huggingface.co/spaces/ntranoslab/esm_variants/blob/main/app.py
@@ -65,11 +82,6 @@ def meltLLR(LLR,gene_prefix=None,ignore_pos=False):
     vars.index=gene_prefix+'_'+vars.index
   return vars
 
-
-import requests
-import json
-import pandas as pd
-
 def fetch_gnomad_variants_by_gene(gene_symbol, dataset="gnomad_r4", reference_genome="GRCh38"):
     """
     Fetches variant data for a gene from gnomAD using GraphQL API.
@@ -111,13 +123,63 @@ def fetch_gnomad_variants_by_gene(gene_symbol, dataset="gnomad_r4", reference_ge
     variants = response.json()["data"]["gene"]["variants"]
     return pd.DataFrame(variants)
 
+def fetch_gnomad_variants_by_gene(gene_symbol, dataset="gnomad_r4", reference_genome="GRCh38"):
+    """
+    Fetches variant data for a gene from gnomAD using GraphQL API.
+    """
+    query = """
+    query ($geneSymbol: String!, $referenceGenome: ReferenceGenomeId!, $dataset: DatasetId!) {
+      gene(gene_symbol: $geneSymbol, reference_genome: $referenceGenome) {
+        variants(dataset: $dataset) {
+          variant_id
+          consequence
+          hgvsc
+          hgvsp
+          transcript_consequence {
+            transcript_id
+            gene_symbol
+            consequence_terms
+            lof
+            lof_filter
+            lof_flags
+          }
+          genome {
+            ac
+            an
+            af
+          }
+        }
+      }
+    }
+    """
+
+    variables = {
+        "geneSymbol": gene_symbol,
+        "referenceGenome": reference_genome,
+        "dataset": dataset
+    }
+    
+    headers = {"Content-Type": "application/json"}
+    response = requests.post(
+        "https://gnomad.broadinstitute.org/api",
+        headers=headers,
+        data=json.dumps({"query": query, "variables": variables}),
+    )
+
+    if response.status_code != 200:
+        raise Exception("gnomAD query failed: " + response.text)
+
+    variants = response.json()["data"]["gene"]["variants"]
+    return pd.DataFrame(variants)
+    
+
 def safe_split(variant_id):
     parts = variant_id.split('-')
     if len(parts) == 4:
         return parts
     else:
         return [None]*4
-
+    
 def format_gnomad_variants(df):
     # --- Split 'variant_id' into 4 columns ---
     variant_parts = df['variant_id'].apply(safe_split)
@@ -158,6 +220,10 @@ def format_gnomad_variants(df):
     return df[df['VEP Annotation'] == 'missense_variant'][columns]
 
 def compare_gnomad_data(api_df, local_df):
+
+    print("API df columns:", api_df.columns.tolist())
+    print("Local df columns:", local_df.columns.tolist())
+
     # Create copies to avoid modifying originals
     api_df = api_df.copy()
     local_df = local_df.copy()
@@ -188,9 +254,7 @@ def compare_gnomad_data(api_df, local_df):
     print(f"API variants (missense): {len(api_df)}")
     print(f"Local variants (missense): {len(local_df)}")
     print(f"Variants unmatched between them: {len(diffs)}")
-
     return merged
-
 
 def enrich_api_with_local(api_df, local_df):
 
@@ -200,7 +264,6 @@ def enrich_api_with_local(api_df, local_df):
     So decided to combine and enrich it
     
     """
-
     
     # Ensure consistent types
     api_df = api_df.copy()
@@ -317,7 +380,7 @@ def plot_hist_kde_with_thresholds(ax, data, bins=30, lower_pct=30, upper_pct=70,
 
 
 # Function to plot the data
-def plot_esm1bVSaf_data(df, protein_name="Random Protein", annotate_top=5, annotate_variants=None):
+def plot_esm1bVSaf_data(df, protein_name="Random Protein", annotate_top=5, annotate_variants=None, savepath=None):
     """
     Plot ESM1B score vs Allele Frequency scatter plot with histograms
 
@@ -387,5 +450,5 @@ def plot_esm1bVSaf_data(df, protein_name="Random Protein", annotate_top=5, annot
                 ax_main.annotate(variant, (allele_freq[idx], esm1b_scores[idx]), 
                                  textcoords="offset points", xytext=(0, 5), ha='center', fontsize=8, color='green', bbox=bbox)
     #fig.tight_layout()
-    plt.savefig(f"{protein_name}_esm1b_plot.png", dpi=300, bbox_inches='tight', pad_inches=0.2)
+    plt.savefig(path.join(savepath, f"{protein_name}_esm1b_plot.png"), dpi=300, bbox_inches='tight', pad_inches=0.2)
     plt.show()
