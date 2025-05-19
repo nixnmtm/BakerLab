@@ -1,7 +1,7 @@
 # Single Cell/Spatial Utility functions
 # Author: Nixon Raj
 
-source("~/research/coding/NGS_utils/Transcriptomics/RNASeqUtils.R")
+source("~/research/coding/BakerLab/NGS_utils/Transcriptomics/RNASeqUtils.R")
 ####Seurat Visium####
 
 plot_average_exp_HeatMap <- function(obj, cluster_colname){
