@@ -6,4 +6,11 @@
 .httr-oauth
 .DS_Store
 .quarto
+# Byte‑compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
 
