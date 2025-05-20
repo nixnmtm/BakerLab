@@ -28,6 +28,7 @@ The repository is organized into the following directories:
 
 - `NGS_utils/`: Contains utilities for NGS data analysis.
 - `cystometry/`: Includes tools for cystometric data analysis.
+- `MolecularDynamics/`: Includes functions for post production analysis of trajectories.
 - `BakerLab.Rproj`: R project file for managing the R environment and scripts.
 - `.gitignore`: Specifies files and directories to be ignored by Git.
 - `README.md`: This file, providing an overview of the repository.
