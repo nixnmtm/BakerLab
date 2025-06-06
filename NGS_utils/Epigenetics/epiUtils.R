@@ -3,11 +3,39 @@
 library(ggplot2)
 library(dplyr)
 
+
+filter_by_conservation <- function(df, min_conservation = 0.8, phast_track = NULL) {
+  if (is.null(phast_track)) {
+    stop("phast_track (GScores object) must be provided.")
+  }
+  
+  # Create GRanges for motif hits
+  hit_gr <- GRanges(
+    seqnames = "chr11",  # adjust if variable
+    ranges = IRanges(start = df$adjusted_start, end = df$adjusted_end),
+    strand = df$strand
+  )
+  
+  # Get conservation scores
+  conservation_scores <- gscores(phast_track, hit_gr)
+  
+  # Add mean conservation score to df
+  df$conservation_score <- mcols(conservation_scores)$default
+  
+  # Filter
+  df_filtered <- df %>% filter(conservation_score >= min_conservation)
+  
+  return(df_filtered)
+}
+
+
+
 #' Filter High Confidence Transcription Factor Binding Sites
 #'
 #' This function filters transcription factor (TF) binding sites (TFBS) based on score thresholds,
 #' minimum number of hits per TF, and optional motif clustering. It also prioritizes TFs using a weighted
-#' scoring system that considers both motif strength and clustering density.
+#' scoring system that considers both motif strength and clustering density. Optionally, conservation
+#' filtering based on phastCons scores can be applied to refine hits to evolutionarily conserved regions.
 #'
 #' @param df A data frame containing motif search results. Must include columns: TF_name, adjusted_start, absScore.
 #' @param absScore_cutoff Numeric. Minimum absolute score threshold for filtering motifs (default = 10).
@@ -19,6 +47,9 @@ library(dplyr)
 #' @param top_n_plot Integer. Number of top TFs to plot in the barplot (default = 30).
 #' @param label_top_n Integer. Number of top TFs to annotate with labels in the plot (default = 5).
 #' @param sort_by Character. How to rank TFs for plotting. Options: "weighted_score", "max_absScore", "mean_absScore" (default = "weighted_score").
+#' @param use_conservation Logical. Whether to filter hits based on evolutionary conservation scores (default = FALSE).
+#' @param phast_track A GScores object (e.g., from phastCons35way.UCSC.mm39). Required if use_conservation = TRUE.
+#' @param min_conservation Numeric. Minimum average phastCons conservation score required to retain a motif hit (default = 0.8).
 #'
 #' @return A filtered and prioritized data frame of TFs with calculated metrics:
 #' \itemize{
@@ -33,32 +64,57 @@ library(dplyr)
 #' @details
 #' The function applies the following workflow:
 #' \enumerate{
-#'   \item Filter motifs above a minimum absScore.
-#'   \item Retain TFs with sufficient number of hits (min_hits).
-#'   \item Calculate motif density (average distance between motifs).
-#'   \item Penalize loosely clustered TFs when calculating the weighted_score.
-#'   \item Optionally plot the top TFs and label the strongest ones.
+#'   \item Optionally filters motif hits based on conservation (if \code{use_conservation = TRUE}).
+#'   \item Filters motifs above a minimum \code{absScore}.
+#'   \item Retains TFs with at least \code{min_hits}.
+#'   \item Calculates motif clustering (average inter-site distance).
+#'   \item Assigns a weighted priority score considering motif strength, cluster tightness, and number of hits.
+#'   \item Optionally visualizes the top TFs.
 #' }
 #'
-#' Useful for identifying likely regulatory TFs in custom genome regions (e.g., after large genomic insertions or deletions).
+#' This is useful for identifying likely regulatory TFs in specific genomic regions (e.g., deleted or inserted segments).
 #'
 #' @examples
 #' \dontrun{
-#' result <- filter_high_conf_tfbs(all_hits_df, absScore_cutoff = 10, min_hits = 5)
+#' library(phastCons35way.UCSC.mm39)
+#' phast <- getGScores("phastCons35way.UCSC.mm39")
+#' result <- filter_high_conf_tfbs(all_hits_df,
+#'                                 absScore_cutoff = 10,
+#'                                 min_hits = 5,
+#'                                 use_conservation = TRUE,
+#'                                 phast_track = phast,
+#'                                 min_conservation = 0.85)
 #' }
 #'
 #' @export
 filter_high_conf_tfbs <- function(df,
-                                  absScore_cutoff = 10, 
-                                  min_hits = 5, 
-                                  cluster = TRUE, 
+                                  absScore_cutoff = 10,
+                                  min_hits = 5,
+                                  cluster = TRUE,
                                   max_avg_dist = 1000,
                                   focus_tfs = NULL,
                                   Plot = TRUE,
                                   top_n_plot = 30,
-                                  label_top_n = 5, 
-                                  sort_by="weighted_score",
-                                  fontsize=8) {
+                                  label_top_n = 5,
+                                  sort_by = "weighted_score",
+                                  fontsize = 8,
+                                  use_conservation = FALSE,
+                                  phast_track = NULL,
+                                  min_conservation = 0.8 ) {
+  
+  # Optionally filter by conservation
+  if (use_conservation) {
+    if (is.null(phast_track)) {
+      stop("To use conservation filtering, supply phast_track (e.g., phastCons35way.UCSC.mm39).")
+    }
+    df <- filter_by_conservation(df, min_conservation = min_conservation, phast_track = phast_track)
+  }
+  
+  # Compute motif center if not already present
+  if (!"motif_center" %in% colnames(df)) {
+    df$motif_center <- floor((df$adjusted_start + df$adjusted_end) / 2)
+  }
+  
   
   # Score-based filtering
   df_filtered <- df %>%
@@ -74,26 +130,24 @@ filter_high_conf_tfbs <- function(df,
   tf_density <- tf_counts %>%
     group_by(TF_name) %>%
     summarise(
-      avg_dist = ifelse(n() > 1, mean(diff(sort(adjusted_start))), NA),
+      avg_dist = ifelse(n() > 1, mean(diff(sort(motif_center))), NA),
       n_hits = n(),
       mean_absScore = mean(absScore),
       max_absScore = max(absScore),
       .groups = "drop"
     )
   
-  # Priority scoring
   tf_density <- tf_density %>%
     mutate(
       cluster_penalty = ifelse(
-        is.na(avg_dist), 
-        0.8,  # Still penalize unknown clusters
+        is.na(avg_dist),
+        0.8,
         pmin(1, max(0.5, 1 - (avg_dist / (2 * max_avg_dist))))
       ),
       weighted_score = (mean_absScore * cluster_penalty) * log2(n_hits + 1)
     )
   
-
-  # Add dynamic cluster classes
+  # Cluster classes
   tf_density <- tf_density %>%
     mutate(
       cluster_class = case_when(
@@ -104,39 +158,21 @@ filter_high_conf_tfbs <- function(df,
       )
     ) %>% arrange(desc(weighted_score))
   
-  # Focus on specific TFs if requested
+  # Optional focus TFs
   if (!is.null(focus_tfs)) {
-    tf_density <- tf_density %>% 
+    tf_density <- tf_density %>%
       filter(TF_name %in% focus_tfs)
   }
   
-  # Plotting optionally
+  # Plotting
   if (Plot) {
-    if (sort_by == "weighted_score"){
-      tf_density_top <- tf_density %>%
-        arrange(desc(weighted_score)) %>%
-        slice_head(n = top_n_plot)
-    }else if (sort_by == "max_absScore"){
-      tf_density_top <- tf_density %>%
-        arrange(desc(max_absScore)) %>%
-        slice_head(n = top_n_plot)
-    }else if (sort_by == "mean_absScore"){
-      tf_density_top <- tf_density %>%
-        arrange(desc(mean_absScore)) %>%
-        slice_head(n = top_n_plot)
-    }
+    tf_density_top <- tf_density %>%
+      arrange(desc(get(sort_by))) %>%
+      slice_head(n = top_n_plot)
     
-    
-    # Format to paste the top Tfs into GXD (https://www.informatics.jax.org/expression.shtml)
-    # Collapse into a single comma-separated string
-    
-    ### WARNING - Make sure you know what you are doing ###
-    # The results are going to be completely biased based on the keywords
-    tf_list_string <- tf_density_top$TF_name %>% paste(collapse = ",")
+    tf_list_string <- paste(tf_density_top$TF_name, collapse = ",")
     print(tf_list_string)
-    #cat(tf_list_string)
     
-    # Identify top N TFs for labeling
     top_labels <- tf_density_top %>%
       slice_max(weighted_score, n = label_top_n) %>%
       pull(TF_name)
@@ -149,26 +185,26 @@ filter_high_conf_tfbs <- function(df,
       geom_text(aes(label = ifelse(TF_name %in% top_labels, TF_name, "")),
                 hjust = -0.1, size = fontsize/2, color = "black", fontface = "bold") +
       scale_fill_manual(values = c(
-        "Tight Cluster" = "#FF5C5C",     # Red
-        "Medium Cluster" = "#FFB84D",    # Orange
-        "Loose Cluster" = "#66B2FF",     # Blue
+        "Tight Cluster" = "#FF5C5C",
+        "Medium Cluster" = "#FFB84D",
+        "Loose Cluster" = "#66B2FF",
         "Unknown" = "grey"
       )) +
-      labs(title = paste0("Top Prioritized TFs (High Confidence)-filtered_by-", sort_by),
-           x = "TF Name", y = "Weighted Score",
-           fill = "Cluster Type") +
+      labs(title = paste0("Top Prioritized TFs (Filtered by ", sort_by, ")"),
+           x = "TF Name", y = "Weighted Score", fill = "Cluster Type") +
       theme_minimal() +
       theme(axis.text = element_text(size = fontsize),
             axis.title = element_text(size = 14),
             plot.title = element_text(size = 16, face = "bold"),
             legend.position = "bottom") +
-      ylim(0, max(tf_density_top$weighted_score) * 1.15)  # Add space for text
+      ylim(0, max(tf_density_top$weighted_score) * 1.15)
     
     print(p)
   }
   
-  return(tf_density_top)
+  return(tf_density)
 }
+
 
 plot_tf_counts_comparison <- function(filtered_df, clustered_df) {
   # Count TF hits
