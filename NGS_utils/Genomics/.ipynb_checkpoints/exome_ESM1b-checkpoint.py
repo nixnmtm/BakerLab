@@ -9,10 +9,13 @@ from matplotlib import gridspec
 import seaborn as sns
 import os.path as path
 import scipy.stats as stats
+from sklearn.metrics import roc_curve
 import logging
 
 import requests
 import json
+
+
 
 """
 # esm-variants for missense
@@ -33,6 +36,8 @@ def setup_logger(name="variant_logger", level="INFO"):
         ch.setFormatter(formatter)
         logger.addHandler(ch)
     return logger
+
+logger = setup_logger(level="INFO")
 
 # This function is modified from 
 # https://huggingface.co/spaces/ntranoslab/esm_variants/blob/main/app.py
@@ -81,47 +86,6 @@ def meltLLR(LLR,gene_prefix=None,ignore_pos=False):
   if gene_prefix is not None:
     vars.index=gene_prefix+'_'+vars.index
   return vars
-
-def fetch_gnomad_variants_by_gene(gene_symbol, dataset="gnomad_r4", reference_genome="GRCh38"):
-    """
-    Fetches variant data for a gene from gnomAD using GraphQL API.
-    """
-    query = """
-    query ($geneSymbol: String!, $referenceGenome: ReferenceGenomeId!, $dataset: DatasetId!) {
-        gene(gene_symbol: $geneSymbol, reference_genome: $referenceGenome) {
-        variants(dataset: $dataset) {
-        variant_id
-        rsid
-        consequence
-        hgvsc
-        hgvsp
-        genome {
-            ac
-            an
-            af
-          }
-        }
-      }
-    }
-    """
-    variables = {
-        "geneSymbol": gene_symbol,
-        "referenceGenome": reference_genome,
-        "dataset": dataset
-    }
-    
-    headers = {"Content-Type": "application/json"}
-    response = requests.post(
-        "https://gnomad.broadinstitute.org/api",
-        headers=headers,
-        data=json.dumps({"query": query, "variables": variables}),
-    )
-
-    if response.status_code != 200:
-        raise Exception("gnomAD query failed: " + response.text)
-
-    variants = response.json()["data"]["gene"]["variants"]
-    return pd.DataFrame(variants)
 
 def fetch_gnomad_variants_by_gene(gene_symbol, dataset="gnomad_r4", reference_genome="GRCh38"):
     """
@@ -221,8 +185,8 @@ def format_gnomad_variants(df):
 
 def compare_gnomad_data(api_df, local_df):
 
-    print("API df columns:", api_df.columns.tolist())
-    print("Local df columns:", local_df.columns.tolist())
+    #print("API df columns:", api_df.columns.tolist())
+    #print("Local df columns:", local_df.columns.tolist())
 
     # Create copies to avoid modifying originals
     api_df = api_df.copy()
@@ -251,8 +215,8 @@ def compare_gnomad_data(api_df, local_df):
 
     diffs = merged[merged["_merge"] != "both"]
 
-    print(f"API variants (missense): {len(api_df)}")
-    print(f"Local variants (missense): {len(local_df)}")
+    print(f"API gnomAD variants (missense): {len(api_df)}")
+    print(f"Local gnomAD variants (missense): {len(local_df)}")
     print(f"Variants unmatched between them: {len(diffs)}")
     return merged
 
@@ -299,7 +263,6 @@ def convert_hgvs_to_variant(hgvs_consequence):
     if isinstance(hgvs_consequence, str):
         # Regular expression to extract original amino acid, position, and new amino acid
         match = re.match(r'p\.([A-Za-z]{3})(\d+)([A-Za-z]{3})', hgvs_consequence)
-        
         if match:
             # Map of three-letter to one-letter amino acid codes
             aa_dict = {
@@ -312,7 +275,7 @@ def convert_hgvs_to_variant(hgvs_consequence):
             original_aa = match.group(1)
             position = match.group(2)
             new_aa = match.group(3)
-            
+
             # Convert to the one-letter format (e.g., p.Cys24Met -> C24M)
             variant_format = f"{aa_dict[original_aa]}{position}{aa_dict[new_aa]}"
             return variant_format
@@ -332,123 +295,116 @@ def calculate_damaging_fraction(df, score_column, threshold=-5):
     df['damaging_fraction'] = df[score_column].rank(method='min', ascending=True) / len(df)
     return df
 
-def plot_hist_kde_with_thresholds(ax, data, bins=30, lower_pct=30, upper_pct=70,
-                                 hist_color='gray', kde_color='blue',
-                                 lower_line_color='red', upper_line_color='green'):
+def determine_cutoff_from_af(df, score_col="score", af_col="Allele Frequency", af_threshold=0.01):
     """
-    Plot a horizontal histogram with KDE on ax, add horizontal threshold lines at percentiles.
+    Determine an ESM1b score cutoff that best separates rare from common variants.
+    
+    Parameters:
+    - df: DataFrame containing score and allele frequency
+    - score_col: column name of ESM1b scores
+    - af_col: column name of Allele Frequency
+    - af_threshold: frequency threshold for "rare" (default: 0.01)
+    
+    Returns:
+    - optimal_score_cutoff: score that gives best separation of rare vs common
+    """
+    df = df[[score_col, af_col]].dropna()
+    
+    # Define rare = 1 (positive class), common = 0
+    y_true = (df[af_col] < af_threshold).astype(int)
+    scores = df[score_col]
+
+    # ROC curve: fpr, tpr, thresholds
+    fpr, tpr, thresholds = roc_curve(y_true, -scores)  # negate because lower score = more deleterious
+
+    # Find optimal threshold (e.g., Youden's J)
+    j_scores = tpr - fpr
+    best_idx = np.argmax(j_scores)
+    optimal_score_cutoff = thresholds[best_idx]
+    
+    return -optimal_score_cutoff  # flip back since we negated above
+
+def plot_esm1bVSaf_data(df, protein_name="Random Protein", af_cut=0.001, 
+                        annotate_top=5, annotate_variants=None, savepath=None, bins=50):
+    """
+    Plot ESM1b score vs Allele Frequency scatter plot with histograms.
 
     Parameters:
-    - ax: matplotlib Axes object where plot will be drawn
-    - data: 1D array-like numeric data (e.g., esm1b_scores)
-    - bins: number of histogram bins
-    - lower_pct: percentile for lower threshold line (e.g., 30 for 30th percentile)
-    - upper_pct: percentile for upper threshold line (e.g., 70 for 70th percentile)
-    - hist_color: color of the histogram bars
-    - kde_color: color of the KDE line
-    - lower_line_color: color of the lower threshold horizontal line
-    - upper_line_color: color of the upper threshold horizontal line
-    """
-
-    # Calculate threshold values from percentiles
-    lower_thresh = np.percentile(data, lower_pct)
-    upper_thresh = np.percentile(data, upper_pct)
-
-    # Plot normalized horizontal histogram
-    ax.hist(data, bins=bins, orientation='horizontal', color=hist_color, density=True)
-    ax.invert_xaxis()
-
-    # Calculate KDE for the data
-    kde = stats.gaussian_kde(data)
-    score_range = np.linspace(min(data), max(data), 1000)
-    kde_values = kde(score_range)
-
-    # Plot KDE line
-    ax.plot(kde_values, score_range, color=kde_color, linewidth=1.5)
-
-    # Plot horizontal threshold lines
-    ax.axhline(lower_thresh, color=lower_line_color, linestyle='--', linewidth=1.5,
-               label=f'{lower_pct}th percentile ({lower_thresh:.2f})')
-    ax.axhline(upper_thresh, color=upper_line_color, linestyle='--', linewidth=1.5,
-               label=f'{upper_pct}th percentile ({upper_thresh:.2f})')
-
-    # Optionally add legend
-    ax.legend(loc='upper right')
-
-    # Set label for the y-axis (score axis)
-    ax.set_ylabel('ESM1b Scores')
-
-
-# Function to plot the data
-def plot_esm1bVSaf_data(df, protein_name="Random Protein", annotate_top=5, annotate_variants=None, savepath=None):
-    """
-    Plot ESM1B score vs Allele Frequency scatter plot with histograms
-
-    :param df: DataFrame with 
-    df: the merged df that has gnomad data, esm1b scores and variants     
-    
+    - df: DataFrame containing 'Allele Frequency', 'score', 'damaging_fraction', and 'variant'
+    - protein_name: Title and filename prefix
+    - af_cut: Frequency threshold (currently unused here)
+    - annotate_top: Number of most damaging variants to annotate
+    - annotate_variants: List of specific variants to annotate
+    - savepath: Folder path to save the figure
+    - bins: Number of bins for histograms
     """
 
     cmap = plt.get_cmap('viridis')
-    
-    allele_freq= df["Allele Frequency"].values
+
+    allele_freq = df["Allele Frequency"].values
     esm1b_scores = df["score"].values
     damaging_scores_fraction = df["damaging_fraction"].values
     variants = df["variant"].values
 
-    # Create a scatter plot with histograms for both axes
-    fig = plt.figure(figsize=(12,6))
+    fig = plt.figure(figsize=(12, 6))
     gs = gridspec.GridSpec(4, 4, width_ratios=[0.3, 1, 0.05, 0.05], height_ratios=[0.3, 1, 0.05, 0.05])
-    grid = plt.GridSpec(4, 4, hspace=0.1, wspace=0.6)
-    
-    # Main scatter plot
+
+    # Scatter plot
     ax_main = fig.add_subplot(gs[1:3, 1:3])
     sc = ax_main.scatter(allele_freq, esm1b_scores, c=damaging_scores_fraction, cmap=cmap, norm=Normalize(vmin=0, vmax=1))
-    ax_main.set_xlabel('Allele Frequency', fontsize=12)
-    ax_main.set_ylabel("ESM1b Scores", fontsize=12)
     ax_main.set_xscale('log')
-    
-    # Color bar to the side
+    ax_main.set_xlabel('Allele Frequency', fontsize=12)
+    ax_main.set_ylabel('ESM1b Scores', fontsize=12)
+
+    # Colorbar
     cbar_ax = fig.add_subplot(gs[1:3, 3])
     cbar = plt.colorbar(sc, cax=cbar_ax)
     cbar.set_label('Fraction of mutations with more damaging scores')
-    
-    # Histograms on top and side 
-    ax_histx = fig.add_subplot(gs[0, 1:3], sharex=ax_main)
-    ax_histy = fig.add_subplot(gs[1:3, 0], sharey=ax_main)
-    
-    # Top histogram for ESM1b scores
-    ax_histx.hist(allele_freq, bins=np.logspace(np.log10(min(allele_freq)), np.log10(max(allele_freq)), 30), color='gray')
-    ax_histx.set_xscale('log')  # Ensure that the histogram x-axis matches the log scale of the scatter plot
-    ax_histx.set_title(f'Protein Data: {protein_name}')
-    ax_histx.get_xaxis().set_visible(False)  # Hide x-axis labels to prevent clutter
-    ax_histx.set_yticks([])  # Remove y-axis ticks from the top histogram
-    ax_histx.set_ylabel('Counts')
-    ax_histx.set_title(f'Protein Data: {protein_name}')
-    
-    # Left histogram for ESM1b scores
-    plot_hist_kde_with_thresholds(ax_histy, esm1b_scores, lower_pct=40, upper_pct=80)
-    
-    # Label the variants that are in the top 10 ESM1b scores and top 5 allele frequencies
-    top_10_esm_indices = np.argsort(esm1b_scores)[:annotate_top]  # Top 10 highest ESM1b scores
-    top_5_allele_indices = np.argsort(allele_freq)[-annotate_top:]  # Top 5 highest allele frequencies
 
-    bbox = dict(dict(boxstyle='round',facecolor='yellow', edgecolor='black', alpha=0.5))
-    
-    # Annotate the top variants
-    for idx in top_10_esm_indices:
+    # Add cutoff line
+    cutoff = determine_cutoff_from_af(df[['Allele Frequency', 'score']])
+    ax_main.axhline(cutoff, color="red", linestyle="--", label=f"Cutoff = {cutoff:.2f}")
+
+    # Top histogram (Allele Frequency)
+    ax_histx = fig.add_subplot(gs[0, 1:3], sharex=ax_main)
+    allele_freq_clean = allele_freq[(~np.isnan(allele_freq)) & (allele_freq > 0)]
+    if allele_freq_clean.size > 0:
+        hist_bins = np.logspace(np.log10(allele_freq_clean.min()), np.log10(allele_freq_clean.max()), bins)
+        ax_histx.hist(allele_freq_clean, bins=hist_bins, color='gray', density=True)
+        ax_histx.set_xscale('log')
+        ax_histx.get_xaxis().set_visible(False)
+        ax_histx.set_yticks([])
+        ax_histx.set_ylabel('Counts')
+        ax_histx.set_title(f'Protein Data: {protein_name}')
+    else:
+        ax_histx.set_visible(False)
+
+    # Side histogram (ESM1b scores)
+    ax_histy = fig.add_subplot(gs[1:3, 0], sharey=ax_main)
+    ax_histy.hist(esm1b_scores, bins=bins, orientation='horizontal', color="blue", density=True)
+    ax_histy.invert_xaxis()
+    ax_histy.set_xlabel('Counts')
+    ax_histy.set_ylabel('ESM1b Scores')
+    ax_histy.axhline(cutoff, color="red", linestyle="--", label=f"Cutoff = {cutoff:.2f}")
+
+
+
+    # Annotate top damaging variants
+    bbox = dict(boxstyle='round', facecolor='yellow', edgecolor='black', alpha=0.5)
+    top_esm_indices = np.argsort(esm1b_scores)[:annotate_top]
+    for idx in top_esm_indices:
         ax_main.annotate(variants[idx], (allele_freq[idx], esm1b_scores[idx]), 
-                         textcoords="offset points", xytext=(0,5), ha='center', fontsize=8, color='red')#, bbox=bbox)
-    
-    for idx in top_5_allele_indices:
-        ax_main.annotate(variants[idx], (allele_freq[idx], esm1b_scores[idx]), 
-                         textcoords="offset points", xytext=(0,5), ha='center', fontsize=8, color='blue')#, bbox=bbox)
-        
+                         textcoords="offset points", xytext=(0, 5), ha='center', fontsize=8, color='red')
+
+    # Annotate specific variants
     if annotate_variants is not None:
         for idx, variant in enumerate(variants):
             if variant in annotate_variants:
                 ax_main.annotate(variant, (allele_freq[idx], esm1b_scores[idx]), 
-                                 textcoords="offset points", xytext=(0, 5), ha='center', fontsize=8, color='green', bbox=bbox)
-    #fig.tight_layout()
-    plt.savefig(path.join(savepath, f"{protein_name}_esm1b_plot.png"), dpi=300, bbox_inches='tight', pad_inches=0.2)
+                                 textcoords="offset points", xytext=(0, 5), ha='center',
+                                 fontsize=8, color='green', bbox=bbox)
+
+    # Save and show
+    if savepath:
+        plt.savefig(path.join(savepath, f"{protein_name}_esm1b_plot.png"), dpi=300, bbox_inches='tight', pad_inches=0.2)
     plt.show()
