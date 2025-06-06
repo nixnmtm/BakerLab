@@ -171,7 +171,7 @@ def plot_rmsf(filename,
         matplotlib.axes.Axes: The axis with the plot.
     """
     # Apply publication style
-    postMD.publication_style(fontsize=fontsize)
+    publication_style(fontsize=fontsize)
 
     # Read data
     data = read_rmsf_xvg(filename)
@@ -191,7 +191,7 @@ def plot_rmsf(filename,
 
     # Labels and formatting
     ax.set_xlabel("Residue", fontsize=fontsize+2)
-    ax.set_ylabel("RMSF ($\mathrm{\AA}$)", fontsize=fontsize+2)
+    ax.set_ylabel(r"RMSF ($\text{\AA}$)", fontsize=fontsize+2)
     ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
 
     # Apply axis limits if provided
@@ -447,7 +447,10 @@ def plot_contact_difference_heatmap(contact_WT, contact_MUT, resids_x, resids_y,
     plt.title("Contact Frequency Difference Map (MUT - WT)")
     plt.tight_layout()
     plt.savefig(output_name, dpi=300)
-    plt.show()
+    # Ensure plot is shown in Jupyter
+    from IPython.display import display
+    display(plt.gcf())
+    plt.close()
 
     return diff_matrix
 
