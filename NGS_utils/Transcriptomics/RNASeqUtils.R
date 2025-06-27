@@ -2,18 +2,20 @@
 # RNASEq Utils
 
 save_it <- function(image_object, filepath, filename, resolution=300, w=800, h=650, format=NULL){
-  # save files in png or pdf
-  if (tolower(format) == "png"){
-    png(paste0(filepath,"/",filename,".png"), res=resolution, width=w, height=h)
+  format <- tolower(format)
+  if (format == "png") {
+    png(file.path(filepath, paste0(filename, ".png")), res = resolution, width = w, height = h)
     print(image_object)
     dev.off()
-  }
-  if (tolower(format) == "pdf"){
-    pdf(paste0(filepath,"/",filename,".pdf"), width=w/96, height=h/96)
+  } else if (format == "pdf") {
+    pdf(file.path(filepath, paste0(filename, ".pdf")), width = w/96, height = h/96)
     print(image_object)
     dev.off()
+  } else {
+    stop("Unsupported format. Use 'png' or 'pdf'.")
   }
-  }
+}
+
 
 total_counts_ggplot <- function(counts_data, groupby=NULL, design, type = "", fontsize=18) {
   counts <- counts_data
@@ -269,7 +271,7 @@ plot_PCA <- function(transformed_data,
                      selected_shape = "Names",
                      fontsize=18,
                      title='PCA',
-                     point_size=10, label=design$caseid){
+                     point_size=10){
   
   
   if (ncol(transformed_data) < 31) {
@@ -277,6 +279,8 @@ plot_PCA <- function(transformed_data,
   } else {
     x_axis_labels <- fontsize-4
   }
+  
+  label=design$sample
   
   pca.object <- prcomp(t(transformed_data))
   
@@ -435,37 +439,31 @@ sig_genes_plot <- function(results, baseMean_cutoff=50, lFC_cutoff=0.58, padj_cu
 
 # Manual function for Normalization as done in DESeq
 # “median of ratios normalization”
-mor_normalization = function(data){
+mor_normalization <- function(data) {
   library(dplyr)
   library(tibble)
   
-  # take the log
-  log_data = log(data) 
+  # Add gene column
+  log_data <- log(data + 1e-8) %>%  # Avoid log(0)
+    as.data.frame() %>%
+    rownames_to_column('gene')
   
-  # find the psuedo-references per sample by taking the geometric mean
-  log_data = log_data %>% 
-    rownames_to_column('gene') %>% 
-    mutate (gene_averages = rowMeans(log_data)) %>% 
-    filter(gene_averages != "-Inf")
+  # Calculate rowMeans (pseudo-reference)
+  log_data <- log_data %>%
+    mutate(gene_averages = rowMeans(across(where(is.numeric)))) %>%
+    filter(gene_averages != -Inf)
   
-  # the last columns is the pseudo-reference column 
-  pseudo_column = ncol(log_data)
+  # Calculate ratios
+  pseudo_column <- ncol(log_data)
+  ratio_matrix <- sweep(log_data[, 2:(pseudo_column - 1)], 1, log_data[, pseudo_column], "-")
   
-  # where to stop before the pseudo column 
-  before_pseduo = pseudo_column - 1
+  # Calculate scaling factors
+  sample_medians <- apply(ratio_matrix, 2, median, na.rm = TRUE)
+  scaling_factors <- exp(sample_medians)
   
-  # find the ratio of the log data to the pseudo-reference
-  ratios = sweep(log_data[,2:before_pseduo], 1, log_data[,pseudo_column], "-")
-  
-  # find the median of the ratios
-  sample_medians = apply(ratios, 2, median)
-  
-  # convert the median to a scaling factor
-  scaling_factors = exp(sample_medians)
-  
-  # use scaling factors to scale the original data
-  manually_normalized = sweep(data, 2, scaling_factors, "/")
-  return(manually_normalized)
+  # Normalize original data
+  norm_matrix <- sweep(data[log_data$gene, ], 2, scaling_factors, "/")
+  return(norm_matrix)
 }
 
 
@@ -491,6 +489,76 @@ plotDE <- function( res, main = "" ){
     log="x", pch=16, , main = main,cex.main = 2, cex = 2, cex.lab = 4, cex.axis = 4, mgp = c(6,0,0), mkh = 10
     ,col = ifelse( res$padj < .05, "red", "black" ) )
 }
+
+
+plot_heatmap_for_given_genes <- function(fc_raw,
+                                         design,
+                                         geneList,
+                                         test_path,
+                                         filter_genes = c("protein_coding"),
+                                         filename = "sm_genes_heatmap.png",
+                                         title = "Gene Heatmap") {
+  library(dplyr)
+  library(tibble)
+  library(pheatmap)
+  
+  message("Step 1: Filtering pseudogenes and selecting test samples...")
+  
+  # Filter by gene type
+  fc_raw <- fc_raw[fc_raw$TYPE %in% filter_genes, ]
+  gene_details <- dplyr::select(fc_raw, ENSEMBL, SYMBOL, TYPE)
+  
+  # Extract test samples
+  test_samples <- as.character(design$sample)
+  fc <- fc_raw %>%
+    dplyr::select(-ENSEMBL, -TYPE) %>%
+    column_to_rownames("SYMBOL") %>%
+    dplyr::select(all_of(test_samples)) %>%
+    as.matrix()
+  
+  # Remove all-zero rows
+  fc <- fc[rowSums(fc) > 0, , drop = FALSE]
+  if (nrow(fc) == 0) stop("❌ No genes remaining after filtering zero rows.")
+  
+  message("Step 2: Normalizing counts...")
+  norm_matrix <- mor_normalization(fc)
+  norm_count <- as.data.frame(norm_matrix)
+  
+  # Filter for genes of interest
+  norm_count <- norm_count[rownames(norm_count) %in% geneList, ]
+  if (nrow(norm_count) == 0) stop("❌ No matching genes found in the provided gene list.")
+  
+  message("Step 3: Preparing annotations and scaling...")
+  anno_col_info <- design %>% column_to_rownames("sample")
+  anno_info_colors <- list(group = c(Treatment = "lightgrey", Control = "black"))
+  
+  counts_scaled <- norm_count %>%
+    t() %>%
+    scale() %>%
+    t()
+  
+  message("Step 4: Plotting heatmap...")
+  p <- pheatmap(
+    counts_scaled,
+    treeheight_row = 40,
+    treeheight_col = 40,
+    cluster_row = TRUE,
+    cluster_col = TRUE,
+    show_rownames = TRUE,
+    show_colnames = TRUE,
+    legend = TRUE,
+    fontsize = 12,
+    fontsize_col = 20,
+    annotation_col = anno_col_info,
+    annotation_colors = anno_info_colors,
+    clustering_distance_rows = "euclidean",
+    main = title
+  )
+
+  # Save to file
+  save_it(p, test_path, filename, format = "png", w = 5000, h = 4500)
+}
+
 
 
 ####Enrichment Visualization####
