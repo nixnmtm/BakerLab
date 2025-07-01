@@ -1,5 +1,5 @@
 # Exploratory data analysis visualization
-# RNASEq Utils
+# RNASeq Utils
 
 save_it <- function(image_object, filepath, filename, resolution=300, w=800, h=650, format=NULL){
   format <- tolower(format)
@@ -15,7 +15,6 @@ save_it <- function(image_object, filepath, filename, resolution=300, w=800, h=6
     stop("Unsupported format. Use 'png' or 'pdf'.")
   }
 }
-
 
 total_counts_ggplot <- function(counts_data, groupby=NULL, design, type = "", fontsize=18) {
   counts <- counts_data

@@ -29,39 +29,78 @@ plotHeatMap <- function(df){
     scale_fill_viridis()
 }
 
-plot_ComplexHeatMap <- function(obj, markers, metadata_cluster_colname=NULL) {
-  
-  mat<- obj[["RNA"]]$data[markers$gene, ] %>% as.matrix()
-  
-  ## scale the rows
-  mat<- t(scale(t(mat)))
-  
-  cluster_anno<- obj@meta.data[[metadata_cluster_colname]]
-  print(cluster_anno)
-  quantile(mat, c(0.1, 0.95))
-  
-  Seurat::PurpleAndYellow()
-  ## make the black color map to 0. the yellow map to highest and the purle map to the lowest
-  col_fun = circlize::colorRamp2(c(-1, 0, 2), c("blue", "gray", "red"))
+plot_ComplexHeatMap <- function(obj, markers, metadata_cluster_colname=NULL, cluster_color_map=NULL) {
   
   library(ComplexHeatmap)
-  Heatmap(mat, name = "Expression",  
-          column_split = factor(cluster_anno, levels=levels(cluster_anno)),
-          cluster_columns = TRUE,
-          show_column_dend = FALSE,
-          cluster_column_slices = FALSE,
-          column_title_gp = gpar(fontsize = 8),
-          column_gap = unit(0.5, "mm"),
-          cluster_rows = FALSE,
-          show_row_dend = FALSE, 
-          col = col_fun,
-          row_names_gp = gpar(fontsize = 8),
-          column_title_rot = 90,
-          top_annotation = HeatmapAnnotation(foo = anno_block(gp = gpar(fill = scales::hue_pal()(9)))),
-          show_column_names = FALSE,
-          use_raster = TRUE,
-          raster_quality = 4)
+  library(circlize)
+  library(dplyr)
+  library(scales)
+  
+  
+  # Check which markers are missing in scale.data
+  missing_genes <- setdiff(markers$gene, rownames(obj[["RNA"]]@layers$scale.data))
+  
+  if(length(missing_genes) == 0){
+    expr_mat <- GetAssayData(obj, layer = "scale.data")[markers$gene, ]
+  } else {
+    message("Scaling raw data for missing genes: ", paste(missing_genes, collapse=", "))
+    mat <- obj[["RNA"]]$data[markers$gene, ] %>% as.matrix()
+    expr_mat <- t(scale(t(mat)))
+  }
+  
+  # Replace extreme scaled values to avoid color compression
+  expr_mat[expr_mat > 2] <- 2
+  expr_mat[expr_mat < -2] <- -2
+  
+  # Extract cluster annotation
+  cluster_anno <- obj@meta.data[[metadata_cluster_colname]]
+  cluster_levels <- levels(factor(cluster_anno))
+  
+  # If no cluster_color_map provided, generate distinct colors automatically
+  if (is.null(cluster_color_map)) {
+    cluster_colors <- hue_pal()(length(cluster_levels))
+    names(cluster_colors) <- cluster_levels
+  } else {
+    # Ensure provided mapping covers all clusters
+    missing_clusters <- setdiff(cluster_levels, names(cluster_color_map))
+    if (length(missing_clusters) > 0) {
+      stop("The following clusters are missing in cluster_color_map: ", paste(missing_clusters, collapse = ", "))
+    }
+    cluster_colors <- cluster_color_map[cluster_levels]
+  }
+  
+  # Create a diverging color function centered at 0
+  col_fun <- colorRamp2(c(-2, 0, 2), c("blue", "white", "red"))
+  
+  # Create a column annotation for clusters
+  column_ha <- HeatmapAnnotation(
+    cluster = factor(cluster_anno, levels = cluster_levels),
+    col = list(cluster = cluster_colors),
+    show_annotation_name = FALSE
+  )
+  
+  # Plot heatmap
+  Heatmap(
+    expr_mat,
+    name = "Expression",
+    col = col_fun,
+    top_annotation = column_ha,
+    column_split = factor(cluster_anno, levels = cluster_levels),
+    cluster_columns = TRUE,
+    show_column_dend = FALSE,
+    cluster_column_slices = FALSE,
+    column_title_gp = gpar(fontsize = 8),
+    column_gap = unit(0.5, "mm"),
+    cluster_rows = FALSE,
+    show_row_dend = FALSE,
+    row_names_gp = gpar(fontsize = 8),
+    column_title_rot = 90,
+    show_column_names = FALSE,
+    use_raster = TRUE,
+    raster_quality = 4
+  )
 }
+
 
 
 check_save_dea_data <- function(markers, path, filename, format="csv"){
@@ -1815,6 +1854,32 @@ addSmallLegend <- function(pointSize = 0.5, textSize = 3, spaceLegend = 0.1) {
   ))
 }
 
+plot_avg_exp_barplot <-  function(avg.exp.mat){
+  
+  #Takes in a matrix with rownames and two columns
+  #plots the expression into barplot
+  
+  df <- as.data.frame(as.matrix(avg.exp.mat))
+  
+  # Add gene names as a column
+  df$gene <- rownames(df)
+  
+  # Load reshape2 for long-format conversion
+  library(reshape2)
+  df_long <- melt(df, id.vars = "gene", variable.name = "sample", value.name = "expression")
+  
+  # Load ggplot2 for plotting
+  library(ggplot2)
+  
+  # Plot
+  ggplot(df_long, aes(x = gene, y = expression, fill = sample)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 8)) +
+    labs(title = "Gene expression comparison", x = "Gene", y = "Expression")
+}
+
+
 
 #' Modified from https://github.com/mojaveazure/seurat-disk/issues/172
 #' Patch of SeuratDisk::SaveH5Seurat function
@@ -1862,28 +1927,50 @@ SaveH5SeuratSpatialObject <- function(
 
 
 ####SPATA utils#### 
-convert2Seurat <- function (spata_obj, image_path){
+convert2Seurat <- function (spata_obj, 
+                            image_path, 
+                            slice_name = "slice1", 
+                            image_name = "tissue_lowres_image.png"){
   # convert a Spata object into seurat
   # using transformSpataToSeurat() doesnt add image to the seurat object
   # so created this function to manually add image and create a seurat obj
   
-  seurat_obj <- SPATA2::transformSpataToSeurat(spata_obj, NormalizeData=F, 
-                                               FindVariableFeatures=F, SCTransform = F,
-                                               ScaleData=F, RunPCA=F, FindNeighbors=F, 
-                                               FindClusters=F, RunTSNE = F,
+  seurat_obj <- SPATA2::transformSpataToSeurat(spata_obj, 
+                                               NormalizeData=F, 
+                                               FindVariableFeatures=F, 
+                                               SCTransform = F,
+                                               ScaleData=F, 
+                                               RunPCA=F, 
+                                               FindNeighbors=F, 
+                                               FindClusters=F, 
+                                               RunTSNE = F,
                                                RunUMAP = F)
-  seurat_obj <- base::tryCatch({
-    lowres <- Read10X_Image(image_path, image.name = "tissue_lowres_image.png")
-    seurat_obj@images$slice1 = lowres
-    seurat_obj@images$slice1@assay = "Spatial"
-    seurat_obj@images$slice1@key = "slice1_"
-    base::warning("The SpatialImage is manually added to the Seurat Object")
-    seurat_obj
-  }, error = function(error) {
-    base::warning("Error in adding image slice manually")
-  })
-  return(seurat_obj)
   
+  image_file <- file.path(image_path, image_name)
+  print(image_file)
+  # Ensure image_file is single string
+  if (length(image_file) != 1) {
+    warning("image_file has length > 1. Using the first entry.")
+    image_file <- image_file[1]
+  }
+  
+  if (file.exists(image_file)) { 
+    seurat_obj <- base::tryCatch({
+      lowres <- Read10X_Image(image_path, image.name = image_name)
+      seurat_obj@images[[slice_name]] <- lowres
+      seurat_obj@images[[slice_name]]@assay <- "Spatial"
+      seurat_obj@images[[slice_name]]@key <- paste0(slice_name, "_")
+      base::message("The SpatialImage is manually added to the Seurat Object as ", slice_name)
+      seurat_obj
+    }, error = function(error) {
+      msg <- tryCatch(as.character(error), error=function(e) "Unknown error in error handler")
+      base::warning("Error in adding image slice manually: ", paste(msg, collapse = " | "))
+      seurat_obj
+    })
+  } else{
+    warning("Image file does not exist: ", image_file)
+  }
+  return(seurat_obj)
 }
 
 
