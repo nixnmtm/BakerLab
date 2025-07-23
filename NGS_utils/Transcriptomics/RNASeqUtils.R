@@ -4,13 +4,27 @@
 save_it <- function(image_object, filepath, filename, resolution=300, w=800, h=650, format=NULL){
   format <- tolower(format)
   if (format == "png") {
-    png(file.path(filepath, paste0(filename, ".png")), res = resolution, width = w, height = h)
-    print(image_object)
-    dev.off()
+    ggsave(
+      filename = file.path(filepath, paste0(filename, ".png")),
+      plot = image_object,
+      width = w/96,
+      height = h/96,
+      dpi = resolution
+    )
+    #png(file.path(filepath, paste0(filename, ".png")), res = resolution, width = w, height = h)
+    #print(image_object)
+    #dev.off()
   } else if (format == "pdf") {
-    pdf(file.path(filepath, paste0(filename, ".pdf")), width = w/96, height = h/96)
-    print(image_object)
-    dev.off()
+    ggsave(
+      filename = file.path(filepath, paste0(filename, ".pdf")),
+      plot = image_object,
+      width = w/96,
+      height = h/96,
+      dpi = resolution
+    )
+    #pdf(file.path(filepath, paste0(filename, ".pdf")), width = w/96, height = h/96)
+    #print(image_object)
+    #dev.off()
   } else {
     stop("Unsupported format. Use 'png' or 'pdf'.")
   }
