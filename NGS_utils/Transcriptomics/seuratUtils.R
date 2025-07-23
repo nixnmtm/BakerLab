@@ -29,7 +29,7 @@ plotHeatMap <- function(df){
     scale_fill_viridis()
 }
 
-plot_ComplexHeatMap <- function(obj, markers, metadata_cluster_colname=NULL, cluster_color_map=NULL) {
+plot_ComplexHeatMap <- function(obj, features, metadata_cluster_colname=NULL, cluster_color_map=NULL) {
   
   library(ComplexHeatmap)
   library(circlize)
@@ -38,19 +38,19 @@ plot_ComplexHeatMap <- function(obj, markers, metadata_cluster_colname=NULL, clu
   
   
   # Check which markers are missing in scale.data
-  missing_genes <- setdiff(markers$gene, rownames(obj[["RNA"]]@layers$scale.data))
+  missing_genes <- setdiff(features, rownames(obj[["RNA"]]@layers$scale.data))
   
   if(length(missing_genes) == 0){
-    expr_mat <- GetAssayData(obj, layer = "scale.data")[markers$gene, ]
+    expr_mat <- GetAssayData(obj, layer = "scale.data")[features, ]
   } else {
     message("Scaling raw data for missing genes: ", paste(missing_genes, collapse=", "))
-    mat <- obj[["RNA"]]$data[markers$gene, ] %>% as.matrix()
+    mat <- obj[["RNA"]]$data[features, ] %>% as.matrix()
     expr_mat <- t(scale(t(mat)))
   }
   
   # Replace extreme scaled values to avoid color compression
-  expr_mat[expr_mat > 2] <- 2
-  expr_mat[expr_mat < -2] <- -2
+  expr_mat[expr_mat > 3] <- 3
+  expr_mat[expr_mat < -3] <- -3
   
   # Extract cluster annotation
   cluster_anno <- obj@meta.data[[metadata_cluster_colname]]
@@ -123,7 +123,7 @@ check_save_dea_data <- function(markers, path, filename, format="csv"){
 }
 
 
-getNwriteDEG_df <- function(markers, path=NULL, file_name=NULL, pcut=1e-2, FCcut=1, 
+getNwriteDEG_df <- function(markers, path=NULL, file_name=NULL, FDR=F, pcut=1e-2, FCcut=1, 
                             rankbyFC=F,
                             rankbyPval=F,
                             rankbyAdjPval=F,
@@ -141,11 +141,18 @@ getNwriteDEG_df <- function(markers, path=NULL, file_name=NULL, pcut=1e-2, FCcut
   }
   
   suffix="filtered"
-  ge <- ge %>%
-    filter(p_val_adj < pcut & abs(avg_log2FC) > FCcut)
-  print(paste0("Filtering by adjusted pval cutoff: ", pcut))
-  print(paste0("and average log2FC cutoff: ", FCcut))
-  
+  if (FDR){
+    ge <- ge %>%
+      filter(p_val_adj_fdr < pcut & abs(avg_log2FC) > FCcut)
+    print(paste0("Filtering by FDR adjusted pval cutoff: ", pcut))
+    print(paste0("and average log2FC cutoff: ", FCcut))
+  }else{
+    ge <- ge %>%
+      filter(p_val_adj < pcut & abs(avg_log2FC) > FCcut)
+    print(paste0("Filtering by adjusted pval cutoff: ", pcut))
+    print(paste0("and average log2FC cutoff: ", FCcut))
+  }
+
   if (rankbyPctDiff){
     ge <- arrange(ge, desc(pct.diff))
   }
@@ -171,88 +178,163 @@ getNwriteDEG_df <- function(markers, path=NULL, file_name=NULL, pcut=1e-2, FCcut
   return(ge)
 }
 
-getDEA_plotVP <- function(object, setIdent=NULL, ident1=NULL, ident2=NULL, 
-                      pcutoff=1e-2, FCcutoff=1,
-                      filename=NULL, filepath=NULL,
-                      plotFDR=F,
-                      connectors=F, subset_ident=NULL){
-
-  if (is.null(subset_ident)){
-    #Idents(object) <- object[[setIdent, drop=T]]
-    Idents(object) <- setIdent
-    print(object)
-    print(levels(object))
-    markers <- FindMarkers(object, ident.1 = ident1, ident.2= ident2)
-  }else{
-    print(paste0("Subsetting based on cluster-", subset_ident))
-    markers <- FindMarkers(object, ident.1 = ident1, ident.2= ident2, 
-                           subset.ident=subset_ident, group_by=setIdent)
-    print(head(markers))
+compare_cond_clusters <- function(object, combined_ident_col, ident1, ident2) {
+  # Check if combined_ident_col exists in metadata
+  if (!(combined_ident_col %in% colnames(object@meta.data))) {
+    stop(paste0("The combined identity column ", combined_ident_col, " is not found in object metadata. 
+                Please create it before calling this function.
+                Example: bl.int$cond_cluster <- paste(bl.int$histology, bl.int$collapsed_clusters, sep = '_'),
+                         In this case the combined_ident_col is 'cond_cluster'"))
   }
+  
+  # Subset object to groups of interest
+  cells_use <- rownames(object@meta.data)[object@meta.data[[combined_ident_col]] %in% c(ident1, ident2)]
+  sub_obj <- subset(object, cells = cells_use)
+  print(table(sub_obj[[combined_ident_col]]))
+  
+  # Set identity to combined identity column
+  Idents(sub_obj) <- combined_ident_col
+  
+  # Run DE between groups
+  markers <- FindMarkers(sub_obj, ident.1 = ident1, ident.2 = ident2)
+  
+  return(list(markers = markers, object = sub_obj))
+}
+
+getDEA_plotVP <- function(object, setIdent=NULL, ident1=NULL, ident2=NULL,  
+                          pcutoff=1e-2, FCcutoff=1,
+                          filename=NULL, filepath=NULL,
+                          plotFDR=F, groupby=NULL,
+                          connectors=F, subset_ident=NULL,
+                          deg_col=c("firebrick1", "royalblue", "black"),
+                          markGenes=NULL,
+                          use_combined_ident=FALSE,
+                          combined_ident_col=NULL) {
+  
+  
+  
+  
+  
+  if(use_combined_ident) {
+    if(is.null(combined_ident_col) | is.null(ident1) | is.null(ident2)) {
+      stop("Please provide combined_ident_col, group1 and group2 when use_combined_ident=TRUE")
+    }
+    
+    # Call the compare_cond_clusters helper
+    de_results <- compare_cond_clusters(object, combined_ident_col, ident1, ident2)
+    print(de_results$markers)
+    markers <- de_results$markers
+    object_sub <- de_results$object
+  } else {
+    if (is.null(ident1) | is.null(ident2)){
+      stop("Please provide both ident1 and ident2")
+    }
+    
+    if (is.null(subset_ident) && is.null(groupby)){
+      Idents(object) <- setIdent
+      markers <- FindMarkers(object, ident.1 = ident1, ident.2= ident2)
+      object_sub <- object
+    } else if (!is.null(groupby)) {
+      Idents(object) <- object[[groupby, drop=TRUE]]
+      markers <- FindMarkers(object, ident.1 = ident1, ident.2 = ident2)
+      object_sub <- object
+    } else if (!is.null(subset_ident)){
+      message("Subsetting based on cluster-", subset_ident)
+      object_sub <- subset(object, idents=subset_ident)
+      Idents(object_sub) <- setIdent
+      markers <- FindMarkers(object_sub, ident.1 = ident1, ident.2 = ident2)
+    }
+  }
+  
+  # p-val adjustment and rest of plotting code...
   markers$p_val_adj_fdr <- p.adjust(markers$p_val, method='fdr')
   markers <- markers %>% as.data.frame() %>% rownames_to_column("gene")
-  
-  keyvals <- rep("gray35", nrow(markers))  # Default color
-  
-  if (plotFDR){
-    y = "p_val_adj_fdr"
-    dir.create(file.path(filepath, "FDR"), recursive = TRUE)
-    filepath <- file.path(filepath, "FDR")
-    filename = paste0(filename, "_FDR")
-    keyvals[markers$avg_log2FC > FCcutoff & 
-              markers$p_val_adj_fdr < pcutoff] <- "firebrick1"
-    keyvals[markers$avg_log2FC < -FCcutoff & 
-              markers$p_val_adj_fdr < pcutoff] <- "royalblue"
-    
-  }else{
-    y = "p_val_adj"
-    dir.create(file.path(filepath, "noFDR"), recursive = TRUE)
-    filepath <- file.path(filepath, "noFDR")
-    filename = paste0(filename, "_noFDR")
-    keyvals[markers$avg_log2FC > FCcutoff & 
-              markers$p_val_adj < pcutoff] <- "firebrick1"
-    keyvals[markers$avg_log2FC < -FCcutoff & 
-              markers$p_val_adj < pcutoff] <- "royalblue"
+
+    keyvals <- rep(deg_col[3], nrow(markers))  # Default color
+
+    if (plotFDR){
+      y = "p_val_adj_fdr"
+      dir.create(file.path(filepath, "FDR"), recursive = TRUE)
+      filepath <- file.path(filepath, "FDR")
+      filename = paste0(filename, "_FDR")
+      keyvals[markers$avg_log2FC > FCcutoff &
+                markers$p_val_adj_fdr < pcutoff] <- deg_col[1]
+      keyvals[markers$avg_log2FC < -FCcutoff &
+                markers$p_val_adj_fdr < pcutoff] <- deg_col[2]
+
+      getNwriteDEG_df(markers, path=filepath, FDR=T, file_name=filename,
+                      pcut=pcutoff, FCcut=FCcutoff,
+                      rankbyFC=F,rankbyPval=T,
+                      rankbyAdjPval=F,rankbyPctDiff=F)
+
+    }else{
+      y = "p_val_adj"
+      dir.create(file.path(filepath, "noFDR"), recursive = TRUE)
+      filepath <- file.path(filepath, "noFDR")
+      filename = paste0(filename, "_noFDR")
+      keyvals[markers$avg_log2FC > FCcutoff &
+                markers$p_val_adj < pcutoff] <- deg_col[1]
+      keyvals[markers$avg_log2FC < -FCcutoff &
+                markers$p_val_adj < pcutoff] <- deg_col[2]
+      getNwriteDEG_df(markers, path=filepath, FDR=F, file_name=filename,
+                      pcut=pcutoff, FCcut=FCcutoff,
+                      rankbyFC=F,rankbyPval=T,
+                      rankbyAdjPval=F,rankbyPctDiff=F)
+    }
+
+    suptitle = paste0("The dotted lines indicate","\n",
+                      "Pval cutoff: ", pcutoff, "\n",
+                      "FoldChange cutoff: ", FCcutoff)
+
+
+    keyvals[is.na(keyvals)] <- deg_col[3]
+    names(keyvals)[keyvals == deg_col[2]] <- paste0("Down-regulated","\n", ident2)
+    names(keyvals)[keyvals == deg_col[1]] <- paste0("Up-regulated", "\n", ident1)
+    names(keyvals)[keyvals == deg_col[3]] <- "NS"
+
+    if (is.null(markGenes)){
+      p <- EnhancedVolcano(markers,
+                           lab=markers$gene,
+                           title = filename,
+                           subtitle = suptitle,
+                           x='avg_log2FC',
+                           y=y, FCcutoff = FCcutoff,
+                           ylab = bquote('-'~Log[10]~ 'adjusted p_value'),
+                           pCutoffCol = y,
+                           pCutoff = pcutoff,
+                           xlab = bquote('Average' ~Log[2]~ 'fold change'),
+                           labSize = 4.0,
+                           pointSize = 4,
+                           colAlpha = 0.8,
+                           legendLabSize = 12,
+                           legendIconSize = 2.0,
+                           widthConnectors = 0.75,
+                           drawConnectors = connectors, arrowheads = F,
+                           max.overlaps=10, colCustom = keyvals)
+    }else{
+      p <- EnhancedVolcano(markers, lab=markers$gene,
+                           selectLab=markGenes,
+                           title = filename,
+                           subtitle = suptitle,
+                           x='avg_log2FC',
+                           y=y, FCcutoff = FCcutoff,
+                           ylab = bquote('-'~Log[10]~ 'adjusted p_value'),
+                           pCutoffCol = y,
+                           pCutoff = pcutoff,
+                           xlab = bquote('Average' ~Log[2]~ 'fold change'),
+                           labSize = 4.0,
+                           pointSize = 4,
+                           colAlpha = 0.8,
+                           legendLabSize = 12,
+                           legendIconSize = 2.0,
+                           widthConnectors = 0.75,
+                           drawConnectors = connectors, arrowheads = F,
+                           max.overlaps=10, colCustom = keyvals)
+    }
+    save_it(p, filepath, paste0("VP-", filename, "_pcut-", pcutoff,"_FCcut-", FCcutoff),
+            format = "png", resolution=300, w=1200, h=1200)
+    return(markers)
   }
-  
-  
-  getNwriteDEG_df(markers, path=filepath, file_name=filename, 
-                  pcut=pcutoff, FCcut=FCcutoff, 
-                  rankbyFC=F,rankbyPval=T,
-                  rankbyAdjPval=F,rankbyPctDiff=F)
-  
-  suptitle = paste0("The dotted lines indicate","\n",
-                    "Pval cutoff: ", pcutoff, "\n",
-                    "FoldChange cutoff: ", FCcutoff)
-  
-  
-  keyvals[is.na(keyvals)] <- 'gray35'
-  names(keyvals)[keyvals == "royalblue"] <- paste0("Down-regulated","\n", ident2)
-  names(keyvals)[keyvals == "firebrick1"] <- paste0("Up-regulated", "\n", ident1)
-  names(keyvals)[keyvals == "gray35"] <- "NS"
-  
-  p <- EnhancedVolcano(markers,
-                       lab=markers$gene,
-                       title = filename,
-                       subtitle = suptitle,
-                       x='avg_log2FC',
-                       y=y, FCcutoff = FCcutoff,
-                       ylab = bquote('-'~Log[10]~ 'Adjusted p_value'),
-                       pCutoffCol = y,
-                       pCutoff = pcutoff,
-                       xlab = bquote('Average' ~Log[2]~ 'fold change'),
-                       labSize = 4.0,
-                       pointSize = 4,
-                       colAlpha = 0.8,
-                       legendLabSize = 12,
-                       legendIconSize = 2.0,
-                       widthConnectors = 0.75,
-                       drawConnectors = connectors, arrowheads = F,
-                       max.overlaps=10, colCustom = keyvals)
-  save_it(p, filepath, paste0("VP-", filename, "_pcut-", pcutoff,"_FCcut-", FCcutoff),
-          format = "png", resolution=300, w=4000, h=4000)
-  return(markers)
-}
 
 # Function to exclude reads from cells with given UMIs > 1000
 remove_contaminated_spots <- function(obj, genes2check, umi_count_cutoff=1000){
@@ -264,7 +346,6 @@ remove_contaminated_spots <- function(obj, genes2check, umi_count_cutoff=1000){
   obj <- subset(obj, subset = UMI_counts <= umi_count_cutoff)
   return(obj)
 }
-
 
 # Function to remove unwanted genes from a Seurat object
 remove_unwanted_genes <- function(obj) {
@@ -540,195 +621,313 @@ total_celltype_proportion <- function(sp.obj, assay_name = "predictions",
 is_not_empty <- function(df) {
   !is.null(df) && nrow(df) > 0
 }
+#### GENE SET ENRICHMENT GO & KEGG ####
+  library(clusterProfiler)
+  library(enrichplot)
+  library(org.Mm.eg.db)
+check_for_empty_enrichment <- function(enrichment_results) {
+  if (length(enrichment_results) == 0 || nrow(enrichment_results) == 0) {
+    message("No enrichment results found. Skipping this step.")
+    return(FALSE)
+  }
+  return(TRUE)
+}
 
-run_GO_KEGGenrichment <- function(dea_markers, pcut=1e-2, FCcut=1, numCategory=10, 
-                                  savepath=NULL, filename=NULL, prefix=NULL) {
+# Function to map gene symbols to Entrez IDs
+get_gentrez2gene_map_list <- function(genename_list) {
+  # Get ENTREZID for the provided gene symbols
+  entrez2gene_df <- AnnotationDbi::select(
+    org.Mm.eg.db,
+    keys = genename_list,
+    columns = c("ENTREZID", "SYMBOL"),
+    keytype = "SYMBOL"
+  )
   
+  # Remove duplicates and NA values
+  entrez2gene_df <- entrez2gene_df[!duplicated(entrez2gene_df), ]
+  entrez2gene_df <- na.omit(entrez2gene_df)
+  
+  # Map SYMBOL to ENTREZID
+  map_entrez2gene <- entrez2gene_df$ENTREZID
+  names(map_entrez2gene) <- entrez2gene_df$SYMBOL
+  
+  return(map_entrez2gene)
+}
+
+# Function to safely apply gene mapping to the dataframe
+apply_entrez_mapping <- function(df, gene_column) {
+  # Get the entrez mapping for the given gene list (from the gene column)
+  entrez_map <- get_gentrez2gene_map_list(df[[gene_column]])
+  
+  # Match the SYMBOL from the dataframe with the names in the mapping
+  df$entrez_id <- sapply(df[[gene_column]], function(gene) entrez_map[gene])
+  
+  return(df)
+}
+
+prepare_gene_lists <- function(dea_markers, pcut = 1e-2, FCcut = 1) {
+  # Filter and prepare gene list
+  deg <- dea_markers %>%
+    as.data.frame() %>%
+    filter(p_val_adj < pcut, abs(avg_log2FC) > FCcut) %>%
+    arrange(p_val_adj)
+  
+  upregulated_genes <- deg[deg$avg_log2FC > 0,]$gene
+  downregulated_genes <- deg[deg$avg_log2FC < 0,]$gene
+  
+  # Convert to ENTREZ IDs
+  geneid.ls <- list(
+    upregulated = upregulated_genes,
+    downregulated = downregulated_genes
+  )
+  
+  # Convert genes to ENTREZIDs
+  geneid.ls <- lapply(geneid.ls, function(genes) {
+    gene.df <- AnnotationDbi::select(org.Mm.eg.db, keys = genes, columns = c("ENTREZID", "SYMBOL"), keytype = "SYMBOL")
+    unique(na.omit(gene.df$ENTREZID))
+  })
+  
+  return(geneid.ls)
+}
+
+
+run_KEGG_enrichment <- function(geneid.ls, numCategory, prefix, filename, savepath) {
+  compKEGG <- compareCluster(
+    geneCluster = geneid.ls,
+    fun = "enrichKEGG",
+    pvalueCutoff = 0.05,
+    pAdjustMethod = "BH",
+    organism = "mmu"
+  )
+  
+  if (!check_for_empty_enrichment(compKEGG)) {
+    return(NULL)
+  }
+  
+  # Dot plot for KEGG
+  g4 <- dotplot(compKEGG, showCategory = numCategory, title = paste0(prefix, "-", filename, "-KEGG Pathway Enrichment Analysis"))
+  save_it(g4, savepath, paste0(filename, "-enrichKEGG"), format = "png", resolution = 300, w = 800, h = 1000)
+  return(compKEGG)
+}
+
+
+run_GO_enrichment <- function(geneid.ls, ont, pvalueCutoff = 0.05, numCategory = 10,
+                              filename = NULL, outpath = NULL) {
+  library(clusterProfiler)
+  library(org.Mm.eg.db)
+  library(dplyr)
+  
+  enrichment_results <- enrichGO(
+    gene = geneid.ls, 
+    OrgDb = "org.Mm.eg.db",  
+    ont = ont, 
+    pvalueCutoff = pvalueCutoff,
+    pAdjustMethod = "BH"
+  )
+  
+  if (!check_for_empty_enrichment(enrichment_results@result)) {
+    return(NULL)
+  }
+  
+  # Calculate FoldEnrichment as per PMID: 34557778
+  GeneRatio_freq <- as.numeric(sub("/\\d+", "", enrichment_results@result$GeneRatio)) / 
+    as.numeric(sub("^\\d+/", "", enrichment_results@result$GeneRatio))
+  BgRatio_freq <- as.numeric(sub("/\\d+", "", enrichment_results@result$BgRatio)) / 
+    as.numeric(sub("^\\d+/", "", enrichment_results@result$BgRatio))
+  
+  enrichment_results@result <- enrichment_results@result %>%
+    mutate(FoldEnrichment = GeneRatio_freq / BgRatio_freq)
+  
+  # Calculate Rich factor
+  enrichment_results@result = mutate(enrichment_results@result, 
+                       richFactor = Count/as.numeric(sub("/\\d+", "", BgRatio)))
+  
+  g <- dotplot(enrichment_results, showCategory = numCategory,
+               title = paste0(filename, "-GO Enrichment Analysis"))
+  
+  save_it(g, outpath, paste0(filename, "-enrichGO"),
+          format = "png", resolution = 300, w = 800, h = 1000)
+  
+  return(enrichment_results@result %>% head(numCategory))
+}
+
+
+run_CNET_plot <- function(go_result, fc, numCategory, ontology, prefix, filename, savepath) {
+  if (!check_for_empty_enrichment(go_result)) return(NULL)
+  
+  # Get upregulated and downregulated genes
+  upregulated_genes <- names(fc)[fc > 0]
+  downregulated_genes <- names(fc)[fc < 0]
+  
+  # Create the CNET plot for upregulated genes
+  cnet_up <- cnetplot(
+    go_result,
+    showCategory = numCategory,
+    color.params = list(foldChange = fc[upregulated_genes], category = "black")
+  ) + ggtitle(paste0(prefix, "-", filename, "Upregulated_GO_", ontology))
+  
+  # Save the CNET plot for upregulated genes
+  save_it(cnet_up, savepath, paste0(filename, "_cnetplot-GO_", ontology, "_Upregulated"), format = "png", resolution = 300, w = 1000, h = 1500)
+  
+  # Create the CNET plot for downregulated genes
+  cnet_down <- cnetplot(
+    go_result,
+    showCategory = numCategory,
+    color.params = list(foldChange = fc[downregulated_genes], category = "black")
+  ) + ggtitle(paste0(prefix, "-", filename, "Downregulated_GO_", ontology))
+  
+  # Save the CNET plot for downregulated genes
+  save_it(cnet_down, savepath, paste0(filename, "_cnetplot-GO_", ontology, "_Downregulated"), format = "png", resolution = 300, w = 1000, h = 1500)
+}
+
+
+run_GO_KEGGenrichment <- function(dea_markers, pcut = 1e-2, FCcut = 1, numCategory = 10, savepath = NULL, filename = NULL, prefix = NULL) {
   library(clusterProfiler)
   library(enrichplot)
   library(org.Mm.eg.db)
   
-  deg <- dea_markers %>% 
-    as.data.frame() %>% rownames_to_column("gene") %>%
-    filter(p_val_adj < pcut, abs(avg_log2FC) > FCcut) %>%
-    arrange(p_val_adj)
+  # Prepare gene lists
+  geneid.ls <- prepare_gene_lists(dea_markers, pcut, FCcut)
   
-  up <- deg[deg$avg_log2FC > 0,]$gene
-  down <- deg[deg$avg_log2FC < 0,]$gene
+  results <- list()
   
-  gene.ls <- list(up, down)
-  names(gene.ls) <- c("upregulated", "downregulated")
-  
-  print(gene.ls)
-  
-  fc <- deg$avg_log2FC
-  names(fc) <- deg$gene
-  
-  geneid.ls <- gene.ls %>% map(~{
-    
-    # here for mouse
-    gene.df <- AnnotationDbi::select(org.Mm.eg.db,
-                                     keys = .x,
-                                     columns = c("ENTREZID", "SYMBOL"),
-                                     keytype = "SYMBOL")
-    
-    gene <- gene.df$ENTREZID
-    gene <- gene[which(!is.na(gene))]
-    gene <- unique(gene)
-    
-    return(gene)
-  })
-  
-  # ---- Run KEGG ----
-  compKEGG <- compareCluster(geneCluster   = geneid.ls,
-                             fun           = "enrichKEGG",
-                             pvalueCutoff  = 0.05,
-                             pAdjustMethod = "BH",
-                             organism = "mmu")
-  
-  # ---- Run GO ----
-  ALL_GO <- compareCluster(geneCluster   = geneid.ls,
-                           fun           = "enrichGO",
-                           pvalueCutoff  = 0.05,
-                           pAdjustMethod = "BH",
-                           OrgDb = org.Mm.eg.db,
-                           ont = 'ALL')
-  
-  BP_GO <- compareCluster(geneCluster   = geneid.ls,
-                          fun           = "enrichGO",
-                          pvalueCutoff  = 0.05,
-                          pAdjustMethod = "BH",
-                          OrgDb = org.Mm.eg.db,
-                          ont = 'BP')
-  
-  CC_GO <- compareCluster(geneCluster   = geneid.ls,
-                          fun           = "enrichGO",
-                          pvalueCutoff  = 0.05,
-                          pAdjustMethod = "BH",
-                          OrgDb = org.Mm.eg.db,
-                          ont = 'CC')
-  MF_GO <- compareCluster(geneCluster   = geneid.ls,
-                          fun           = "enrichGO",
-                          pvalueCutoff  = 0.05,
-                          pAdjustMethod = "BH",
-                          OrgDb = org.Mm.eg.db,
-                          ont = 'MF')
-  
-  # ---- Dot plot ----
-  ## dot plot
-  g0 <- dotplot(ALL_GO, showCategory = 20, title = paste0(prefix, "-", filename, "-ALL_GO_Enrichment"), font.size = 16)
-  save_it(g0, savepath, paste0(paste0(filename, "-enrichALL_GO")),
-          format = "png", resolution=300, w=8000, h=5000)  
-  
-  g1 <- dotplot(BP_GO, showCategory = numCategory, title = paste0(prefix, "-",filename, "-BP_GO_Enrichment"), font.size = 16)
-  g2 <- dotplot(CC_GO, showCategory = numCategory, title = paste0(prefix, "-",filename, "-CC_GO_Enrichment"), font.size = 16)
-  g3 <- dotplot(MF_GO, showCategory = numCategory, title = paste0(prefix, "-",filename, "-MF_GO_Enrichment"), font.size = 16)
-  
-  save_it(g1+g2+g3, savepath, paste0(paste0(filename, "-enrichGO")),
-          format = "png", resolution=300, w=8000, h=3000)
-  
-  g4 <- dotplot(compKEGG, showCategory = numCategory, title = paste0(prefix, "-",filename, "-KEGG Pathway Enrichment Analysis"))
-  save_it(g4, savepath, paste0(filename, "-enrichKEGG"),
-          format = "png", resolution=300, w=2000, h=5000)
+  # Run KEGG enrichment
+  results$kegg <- run_KEGG_enrichment(geneid.ls, numCategory, prefix, filename, savepath)
   
   
-  # ---- CNET plot ----
   
-  # all
-  all.ls <- geneid.ls %>% map(~{
-    
-    eALL_GO <- enrichGO(
-      gene          = .x,
-      OrgDb         = org.Mm.eg.db,
-      ont           = "ALL",
-      pAdjustMethod = "BH",
-      pvalueCutoff  = 0.05,
-      readable      = TRUE
-    )
-    return(eALL_GO)
-  })
-  if (is_not_empty(all.ls$upregulated) & is_not_empty(all.ls$downregulated)){
-    n1 <-  cnetplot(all.ls$upregulated, showCategory = numCategory,
-                    color.params = list(foldChange = fc,
-                                        category="black")) + ggtitle(paste0(prefix, "-",filename, "Upregulated_GO_ALL"))
-    n2 <-  cnetplot(all.ls$downregulated, showCategory = numCategory,
-                    color.params = list(foldChange = fc,
-                                        category="black")) + ggtitle(paste0(prefix, "-",filename, "Downregulated_GO_ALL"))
-    save_it(n1+n2, savepath, paste0(paste0(filename, "_cnetplot-GO_ALL")),
-            format = "png", resolution=300, w=5000, h=5000)
+  # Run GO enrichment and get the results
+  results$ALL_up <- run_GO_enrichment(geneid.ls = geneid.ls$upregulated,
+                                      ont="ALL", pvalueCutoff = pcut,
+                                      numCategory = numCategory, 
+                                      paste0("ALL_UP_",filename), 
+                                      savepath)
+  
+  results$ALL_down <- run_GO_enrichment(geneid.ls = geneid.ls$downregulated,
+                                        ont="ALL", pvalueCutoff = pcut,
+                                        numCategory = numCategory, 
+                                        paste0("ALL_DOWN_",filename), 
+                                        savepath)
+
+  results$BP_up <- run_GO_enrichment(geneid.ls$upregulated, 
+                                     ont="BP", pvalueCutoff = pcut,
+                                     numCategory = numCategory, 
+                                     paste0("BP_UP_",filename), 
+                                     savepath)
+
+  results$BP_down <- run_GO_enrichment(geneid.ls$downregulated, 
+                                       ont="BP", pvalueCutoff = pcut,
+                                       numCategory = numCategory, 
+                                       paste0("BP_DOWN_",filename), 
+                                       savepath)
+
+  results$CC_up <- run_GO_enrichment(geneid.ls$upregulated, 
+                                     ont="CC", pvalueCutoff = pcut,
+                                     numCategory = numCategory, 
+                                     paste0("CC_UP_",filename), 
+                                     savepath)
+
+  results$CC_down <- run_GO_enrichment(geneid.ls$downregulated, 
+                                       ont="CC", pvalueCutoff = pcut,
+                                       numCategory = numCategory, 
+                                       paste0("CC_DOWN_",filename),
+                                       savepath)
+
+  results$MF_up <- run_GO_enrichment(geneid.ls$upregulated, 
+                                     ont="MF", pvalueCutoff = pcut,
+                                     numCategory = numCategory, 
+                                     paste0("MF_UP_",filename), 
+                                     savepath)
+
+  results$MF_down <- run_GO_enrichment(geneid.ls$downregulated, 
+                                       ont="MF", pvalueCutoff = pcut,
+                                       numCategory = numCategory, 
+                                       paste0("MF_DOWN_",filename), 
+                                       savepath)
+  print(paste0("ALL DONE"))
+  return(results)
+}
+
+# Load necessary libraries
+library(ggplot2)
+
+plot_top_GO_enrichment_from_df <- function(go_results_df,
+                                           numTopTerms = 10,
+                                           savepath = NULL,
+                                           plot_by_x = "FoldEnrichment") {
+  # Required columns
+  required_cols <- c("qvalue", "Description", "GeneRatio", "BgRatio", "Count")
+  if (!all(required_cols %in% colnames(go_results_df))) {
+    stop(paste("Missing required columns:", paste(setdiff(required_cols, colnames(go_results_df)), collapse = ", ")))
   }
   
-  #Biological Process
-  bp.ls <- geneid.ls %>% map(~{
+  # Calculate metrics
+  go_results_df <- go_results_df %>%
+    mutate(
+      GeneRatio = as.numeric(sub("/\\d+", "", GeneRatio)) / as.numeric(sub("^\\d+/", "", GeneRatio)),
+      BgRatio = as.numeric(sub("/\\d+", "", BgRatio)) / as.numeric(sub("^\\d+/", "", BgRatio)),
+      richFactor = Count / as.numeric(sub("/\\d+", "", BgRatio)),
+      FoldEnrichment = GeneRatio / BgRatio
+    )
+  
+  # Select top terms based on qvalue
+  top_go_terms <- go_results_df %>%
+    arrange(qvalue) %>%
+    slice_head(n = min(numTopTerms, nrow(.))) %>%
+    mutate(Description = factor(Description, levels = rev(Description)))
+  
+  # Y axis mapping and label
+  y_col <- switch(plot_by_x,
+                  "GeneRatio" = "GeneRatio",
+                  "FoldEnrichment" = "FoldEnrichment",
+                  "richFactor" = "richFactor",
+                  stop("Invalid 'plot_by_x' value: must be 'GeneRatio', 'FoldEnrichment', or 'richFactor'."))
+  
+  y_label <- switch(plot_by_x,
+                    "GeneRatio" = "Gene Ratio",
+                    "FoldEnrichment" = "Fold Enrichment",
+                    "richFactor" = "Rich Factor")
+  
+  # Define a threshold for label placement
+  threshold <- 0.1 * max(top_go_terms[[y_col]], na.rm = TRUE)
+  
+  # Create a new column for hjust and text color based on value size
+  top_go_terms <- top_go_terms %>%
+    mutate(
+      hjust_value = ifelse(.data[[y_col]] < threshold, -0.1, 1.05),
+      text_color = ifelse(.data[[y_col]] < threshold, "black", "white")
+    )
+  
+  # Build plot
+  p <- ggplot(top_go_terms, aes(x = .data[[y_col]], 
+                                y = reorder(Description, .data[[y_col]]), 
+                                fill = qvalue)) +
+    geom_bar(stat = "identity") +
     
-    eBP_GO <- enrichGO(
-      gene          = .x,
-      OrgDb         = org.Mm.eg.db,
-      ont           = "BP",
-      pAdjustMethod = "BH",
-      pvalueCutoff  = 0.05,
-      readable      = TRUE
+    # geom_text(aes(label = Description, 
+    #               hjust = hjust_value, 
+    #               color = text_color),
+    #           size = 5, show.legend = FALSE) +
+    # 
+    scale_color_identity() +  # Use colors as-is
+    scale_fill_gradient(
+      low = "red", high = "blue", name = "FDR",
+      guide = guide_colourbar(reverse = TRUE)
+    ) +
+    
+    theme_minimal() +
+    labs(x = y_label, y = NULL) +
+    theme(
+      panel.grid.major = element_blank(),   # Remove major grid lines
+      panel.grid.minor = element_blank(),   # Remove minor grid lines
+      panel.background = element_blank(),   # Remove panel background
+      axis.line = element_line(color = "black", linewidth = 2),  # Keep x and y axis lines
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      axis.ticks = element_line(color = "black", linewidth = 1.2),# Show axis ticks
+      axis.ticks.length.y = unit(-0.25, "cm"),  # Y-axis ticks inward
+      axis.ticks.length.x = unit(0.25, "cm"),   # X-axis ticks default outward
     )
-    return(eBP_GO)
-  })
-  
-  if (is_not_empty(bp.ls$upregulated) & is_not_empty(bp.ls$downregulated)){
-    n1 <-  cnetplot(bp.ls$upregulated, showCategory = numCategory,
-                    color.params = list(foldChange = fc,
-                                        category="black")) + ggtitle(paste0(prefix, "-",filename, "Upregulated_GO_BP"))
-    n2 <-  cnetplot(bp.ls$downregulated, showCategory = numCategory,
-                    color.params = list(foldChange = fc,
-                                        category="black")) + ggtitle(paste0(prefix, "-",filename, "Downregulated_GO_BP"))
-    save_it(n1+n2, savepath, paste0(filename, "_cnetplot-GO_BP"),
-            format = "png", resolution=300, w=8000, h=5000)
-  }
-  
-  # Molecular Function
-  mf.ls <- geneid.ls %>% map(~{
-    eMF_GO <- enrichGO(
-      gene          = .x,
-      OrgDb         = org.Mm.eg.db,
-      ont           = "MF",
-      pAdjustMethod = "BH",
-      pvalueCutoff  = 0.05,
-      readable      = TRUE
-    )
-    return(eMF_GO)
-  })
-  
-  if (is_not_empty(mf.ls$upregulated) & is_not_empty(mf.ls$downregulated)){
-    n3 <-  cnetplot(mf.ls$upregulated, showCategory = numCategory,
-                    color.params = list(foldChange = fc,
-                                        category="black")) + ggtitle(paste0(prefix, "-",filename, "Upregulated_GO_MF"))
-    n4 <-  cnetplot(mf.ls$downregulated, showCategory = numCategory,
-                    color.params = list(foldChange = fc,
-                                        category="black")) + ggtitle(paste0(prefix, "-",filename, "Downregulated_GO_MF"))
-    save_it(n3+n4, savepath, paste0(filename, "_cnetplot-GO_MF"),
-            format = "png", resolution=300, w=8000, h=5000)
-  }
-  # Cellular Components
-  cc.ls <- geneid.ls %>% map(~{
-    eCC_GO <- enrichGO(
-      gene          = .x,
-      OrgDb         = org.Mm.eg.db,
-      ont           = "CC",
-      pAdjustMethod = "BH",
-      pvalueCutoff  = 0.05,
-      readable      = TRUE
-    )
-    return(eCC_GO)
-  })
-  
-  if (is_not_empty(cc.ls$upregulated) & is_not_empty(cc.ls$downregulated)){
-    n5 <-  cnetplot(cc.ls$upregulated, showCategory = numCategory,
-                    color.params = list(foldChange = fc,
-                                        category="black")) + ggtitle(paste0(prefix, "-",filename, "Upregulated_GO_CC"))
-    n6 <-  cnetplot(cc.ls$downregulated, showCategory = numCategory,
-                    color.params = list(foldChange = fc,
-                                        category="black ")) + ggtitle(paste0(prefix, "-",filename, "Downregulated_GO_CC"))
-    save_it(n5+n6, savepath, paste0(filename, "_cnetplot-GO_CC"),
-            format = "png", resolution=300, w=8000, h=5000)
-  }
+  return(p)
 }
 
 run_integration_analysis <- function(obj, integration, result_path, res = 2, fcut = 1, pcut = 0.05, cols=NULL) {
@@ -2434,29 +2633,49 @@ convertHumanGeneList <- function(x){
   return(humanx)
 }
 
-mapgenes_mm_hs <- function(genes, mouse2human=F, human2mouse=F){
-  # Converts genes from mouse 2 human or from human 2 mouse 
-  library(Orthology.eg.db)
-  library(org.Mm.eg.db)
-  library(org.Hs.eg.db)
-  if(mouse2human){
-    gns <- mapIds(org.Mm.eg.db, genes, "ENTREZID", "SYMBOL")
-    mapped <- select(Orthology.eg.db, gns, "Homo_sapiens","Mus_musculus")
-    naind <- is.na(mapped$Homo_sapiens)
-    hsymb <- mapIds(org.Hs.eg.db, as.character(mapped$Homo_sapiens[!naind]), "SYMBOL", "ENTREZID")
-    out <- data.frame(Mouse_symbol = genes, mapped, Human_symbol = NA)
-    out$Human_symbol[!naind] <- hsymb
-  }
-  if(human2mouse){
-    gns <- mapIds(org.Hs.eg.db, genes, "ENTREZID", "SYMBOL")
-    mapped <- select(Orthology.eg.db, gns, "Mus_musculus", "Homo_sapiens")
-    naind <- is.na(mapped$Mus_musculus)
-    msymb <- mapIds(org.Mm.eg.db, as.character(mapped$Mus_musculus[!naind]), "SYMBOL", "ENTREZID")
-    out <- data.frame(Human_symbol = genes, mapped, Mouse_symbol = NA)
-    out$Mouse_symbol[!naind] <- msymb
-  }
+convert_genes <- function(gene_list, species = "human_to_mouse") {
+  # Load the biomaRt package
+
+  library(biomaRt)
+
+  # Initialize biomaRt for human and mouse gene conversion
+  ensembl_human <- useEnsembl("ensembl","hsapiens_gene_ensembl", mirror = "useast", host = "www.ensembl.org")
+  ensembl_mouse <- useEnsembl("ensembl","mmusculus_gene_ensembl", mirror = "useast", host = "www.ensembl.org")
   
-  return(out)
+  # Check species and set up appropriate conversion
+  if (species == "human_to_mouse") {
+    # Map human gene symbols to mouse gene symbols
+    result <- getLDS(
+      attributes = c("hgnc_symbol"),           # Human gene symbols
+      filters = "hgnc_symbol",                 # Use human gene symbols as input
+      values = gene_list,                      # Input list of human genes
+      mart = ensembl_human,                    # Human mart
+      attributesL = c("mgi_symbol"),           # Get mouse gene symbols (MGI)
+      martL = ensembl_mouse                    # Mouse mart
+    )
+    
+    # Return only valid mouse genes (removing NA values)
+    valid_mouse_genes <- result[!is.na(result$mgi_symbol), ]
+    return(valid_mouse_genes$mgi_symbol)
+    
+  } else if (species == "mouse_to_human") {
+    # Map mouse gene symbols to human gene symbols
+    result <- getLDS(
+      attributes = c("mgi_symbol"),            # Mouse gene symbols
+      filters = "mgi_symbol",                  # Use mouse gene symbols as input
+      values = gene_list,                      # Input list of mouse genes
+      mart = ensembl_mouse,                    # Mouse mart
+      attributesL = c("hgnc_symbol"),          # Get human gene symbols (HGNC)
+      martL = ensembl_human                    # Human mart
+    )
+    
+    # Return only valid human genes (removing NA values)
+    valid_human_genes <- result[!is.na(result$hgnc_symbol), ]
+    return(valid_human_genes$hgnc_symbol)
+    
+  } else {
+    stop("Invalid species. Please specify 'human_to_mouse' or 'mouse_to_human'.")
+  }
 }
 
 lm_eqn <- function(df){
