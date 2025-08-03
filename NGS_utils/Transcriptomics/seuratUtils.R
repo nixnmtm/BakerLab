@@ -930,6 +930,8 @@ plot_top_GO_enrichment_from_df <- function(go_results_df,
   return(p)
 }
 
+
+
 run_integration_analysis <- function(obj, integration, result_path, res = 2, fcut = 1, pcut = 0.05, cols=NULL) {
   library(Seurat)
   library(dplyr)

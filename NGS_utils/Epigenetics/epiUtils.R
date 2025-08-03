@@ -28,8 +28,6 @@ filter_by_conservation <- function(df, min_conservation = 0.8, phast_track = NUL
   return(df_filtered)
 }
 
-
-
 #' Filter High Confidence Transcription Factor Binding Sites
 #'
 #' This function filters transcription factor (TF) binding sites (TFBS) based on score thresholds,
