@@ -41,8 +41,10 @@ def parse_args():
                        help="Trajectory file, output [default: %(default)s]",
                        default=path.join(os.curdir, "traj.aligned.xtc"),
                        metavar="TRJ")
-    iogrp.add_argument("-r", "--ref", dest="refinfo", nargs=2, metavar="REF",
-                       help="Reference structure for alignment [PSF CRD]")
+    iogrp.add_argument("-rs", "--refS", dest="ref_struc", metavar="REF_STRUC",
+                       help="Reference structure for alignment PSF")
+    iogrp.add_argument("-rc", "--refC", dest="ref_coor", metavar="REF_COOR",
+                       help="Reference structure for alignment CRD")
     iogrp.add_argument("-sel", "--select", dest="selection", type=str, metavar="SELECTION",
                        help="example name Ca and segid 3CM5")
     # Process arguments
@@ -53,16 +55,16 @@ def parse_args():
 
     return args
 
-
 def align_traj(args):
     """Merge coordinate files into a single trajectory file.
 
     :param args: command-line arguments
     """
     # Setup reference structure for alignment
-    if args.refinfo: # set the given reference
+    if args.ref_struc and args.ref_coor: # set the given reference
         print("Using the given reference structure")
-        refpsf, reftraj = args.refinfo
+        refpsf = args.ref_struc
+        reftraj = args.ref_coor
     else:
         refpsf = args.structin
         reftraj = args.trajin
@@ -74,11 +76,11 @@ def align_traj(args):
 
     # Align the coordinates to the reference structure and write to a
     # trajectory file.
-    
+
     select = "all"
     if args.selection:
         select = args.selection
-    if args.verbose: 
+    if args.verbose:
         aligned = mdalign.AlignTraj(test_univ, ref_univ, select=select,
                 filename=args.trajout, verbose=True)
     else:
