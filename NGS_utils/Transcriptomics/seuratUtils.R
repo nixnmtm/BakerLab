@@ -29,57 +29,81 @@ plotHeatMap <- function(df){
     scale_fill_viridis()
 }
 
-plot_ComplexHeatMap <- function(obj, features, metadata_cluster_colname=NULL, cluster_color_map=NULL) {
-  
+plot_ComplexHeatMap <- function(obj, features, metadata_cluster_colname = NULL, cluster_color_map = NULL) {
   library(ComplexHeatmap)
   library(circlize)
   library(dplyr)
   library(scales)
+  library(grid)
   
-  
-  # Check which markers are missing in scale.data
-  missing_genes <- setdiff(features, rownames(obj[["RNA"]]@layers$scale.data))
-  
-  if(length(missing_genes) == 0){
-    expr_mat <- GetAssayData(obj, layer = "scale.data")[features, ]
-  } else {
-    message("Scaling raw data for missing genes: ", paste(missing_genes, collapse=", "))
-    mat <- obj[["RNA"]]$data[features, ] %>% as.matrix()
-    expr_mat <- t(scale(t(mat)))
+  if (is.null(metadata_cluster_colname)) {
+    stop("Please provide 'metadata_cluster_colname'.")
   }
   
-  # Replace extreme scaled values to avoid color compression
-  expr_mat[expr_mat > 3] <- 3
+  # Which features are missing from scale.data?
+  rn <- rownames(obj[["RNA"]]@layers$scale.data)
+  missing_genes <- setdiff(features, rn)
+  
+  # Build expr_mat with dimensions preserved even if length(features) == 1
+  if (length(missing_genes) == 0) {
+    expr_mat <- GetAssayData(obj, layer = "scale.data")[features, , drop = FALSE]
+  } else {
+    message("Scaling raw data for missing genes: ", paste(missing_genes, collapse = ", "))
+    # Subset raw data (may be dgCMatrix); keep dims with drop=FALSE
+    mat <- obj[["RNA"]]$data[features, , drop = FALSE]
+    # Scale by gene (row-wise)
+    expr_mat <- t(scale(t(as.matrix(mat))))
+  }
+  
+  # Cap extreme z-scores
+  expr_mat[expr_mat > 3]  <- 3
   expr_mat[expr_mat < -3] <- -3
   
-  # Extract cluster annotation
-  cluster_anno <- obj@meta.data[[metadata_cluster_colname]]
+  # Align metadata to columns of the matrix to guarantee matching length/order
+  cell_ids <- colnames(expr_mat)
+  if (is.null(cell_ids)) stop("expr_mat has no column names; expected cells as columns.")
+  if (!all(cell_ids %in% rownames(obj@meta.data))) {
+    stop("Some columns in expr_mat are not present in obj@meta.data.")
+  }
+  cluster_anno <- obj@meta.data[cell_ids, metadata_cluster_colname, drop = TRUE]
+  
+  # Handle NAs explicitly
+  if (any(is.na(cluster_anno))) {
+    stop("Missing values in cluster annotation for some cells. Check '", metadata_cluster_colname, "'.")
+  }
+  
   cluster_levels <- levels(factor(cluster_anno))
   
-  # If no cluster_color_map provided, generate distinct colors automatically
+  # Colors
   if (is.null(cluster_color_map)) {
     cluster_colors <- hue_pal()(length(cluster_levels))
     names(cluster_colors) <- cluster_levels
   } else {
-    # Ensure provided mapping covers all clusters
     missing_clusters <- setdiff(cluster_levels, names(cluster_color_map))
     if (length(missing_clusters) > 0) {
-      stop("The following clusters are missing in cluster_color_map: ", paste(missing_clusters, collapse = ", "))
+      stop("The following clusters are missing in cluster_color_map: ",
+           paste(missing_clusters, collapse = ", "))
     }
     cluster_colors <- cluster_color_map[cluster_levels]
   }
   
-  # Create a diverging color function centered at 0
+  # Color function for expression
   col_fun <- colorRamp2(c(-2, 0, 2), c("blue", "white", "red"))
   
-  # Create a column annotation for clusters
+  # Column annotation (aligned to expr_mat columns)
   column_ha <- HeatmapAnnotation(
     cluster = factor(cluster_anno, levels = cluster_levels),
     col = list(cluster = cluster_colors),
     show_annotation_name = FALSE
   )
   
-  # Plot heatmap
+  # Defensive check: lengths must match
+  if (length(cluster_anno) != ncol(expr_mat)) {
+    stop("Length of cluster annotation (", length(cluster_anno),
+         ") does not match ncol(expr_mat) (", ncol(expr_mat), ").")
+  }
+  
+  # Plot
   Heatmap(
     expr_mat,
     name = "Expression",
@@ -100,6 +124,7 @@ plot_ComplexHeatMap <- function(obj, features, metadata_cluster_colname=NULL, cl
     raster_quality = 4
   )
 }
+
 
 
 
@@ -178,7 +203,7 @@ getNwriteDEG_df <- function(markers, path=NULL, file_name=NULL, FDR=F, pcut=1e-2
   return(ge)
 }
 
-compare_cond_clusters <- function(object, combined_ident_col, ident1, ident2) {
+compare_cond_clusters <- function(object, combined_ident_col, ident1, ident2, test.use="wilcox") {
   # Check if combined_ident_col exists in metadata
   if (!(combined_ident_col %in% colnames(object@meta.data))) {
     stop(paste0("The combined identity column ", combined_ident_col, " is not found in object metadata. 
@@ -196,13 +221,13 @@ compare_cond_clusters <- function(object, combined_ident_col, ident1, ident2) {
   Idents(sub_obj) <- combined_ident_col
   
   # Run DE between groups
-  markers <- FindMarkers(sub_obj, ident.1 = ident1, ident.2 = ident2)
+  markers <- FindMarkers(sub_obj, ident.1 = ident1, ident.2 = ident2, test.use=test.use)
   
   return(list(markers = markers, object = sub_obj))
 }
 
 getDEA_plotVP <- function(object, setIdent=NULL, ident1=NULL, ident2=NULL,  
-                          pcutoff=1e-2, FCcutoff=1,
+                          pcutoff=1e-2, FCcutoff=1, test.use="wilcox",
                           filename=NULL, filepath=NULL,
                           plotFDR=F, groupby=NULL,
                           connectors=F, subset_ident=NULL,
@@ -221,7 +246,7 @@ getDEA_plotVP <- function(object, setIdent=NULL, ident1=NULL, ident2=NULL,
     }
     
     # Call the compare_cond_clusters helper
-    de_results <- compare_cond_clusters(object, combined_ident_col, ident1, ident2)
+    de_results <- compare_cond_clusters(object, combined_ident_col, ident1, ident2, test.use=test.use)
     print(de_results$markers)
     markers <- de_results$markers
     object_sub <- de_results$object
@@ -232,17 +257,17 @@ getDEA_plotVP <- function(object, setIdent=NULL, ident1=NULL, ident2=NULL,
     
     if (is.null(subset_ident) && is.null(groupby)){
       Idents(object) <- setIdent
-      markers <- FindMarkers(object, ident.1 = ident1, ident.2= ident2)
+      markers <- FindMarkers(object, ident.1 = ident1, ident.2= ident2, test.use=test.use)
       object_sub <- object
     } else if (!is.null(groupby)) {
       Idents(object) <- object[[groupby, drop=TRUE]]
-      markers <- FindMarkers(object, ident.1 = ident1, ident.2 = ident2)
+      markers <- FindMarkers(object, ident.1 = ident1, ident.2 = ident2, test.use=test.use)
       object_sub <- object
     } else if (!is.null(subset_ident)){
       message("Subsetting based on cluster-", subset_ident)
       object_sub <- subset(object, idents=subset_ident)
       Idents(object_sub) <- setIdent
-      markers <- FindMarkers(object_sub, ident.1 = ident1, ident.2 = ident2)
+      markers <- FindMarkers(object_sub, ident.1 = ident1, ident.2 = ident2, test.use=test.use)
     }
   }
   
@@ -705,7 +730,7 @@ run_KEGG_enrichment <- function(geneid.ls, numCategory, prefix, filename, savepa
   }
   
   # Dot plot for KEGG
-  g4 <- dotplot(compKEGG, showCategory = numCategory, title = paste0(prefix, "-", filename, "-KEGG Pathway Enrichment Analysis"))
+  g4 <- enrichplot::dotplot(compKEGG, showCategory = numCategory, title = paste0(prefix, "-", filename, "-KEGG Pathway Enrichment Analysis"))
   save_it(g4, savepath, paste0(filename, "-enrichKEGG"), format = "png", resolution = 300, w = 800, h = 1000)
   return(compKEGG)
 }
@@ -742,7 +767,7 @@ run_GO_enrichment <- function(geneid.ls, ont, pvalueCutoff = 0.05, numCategory =
   enrichment_results@result = mutate(enrichment_results@result, 
                        richFactor = Count/as.numeric(sub("/\\d+", "", BgRatio)))
   
-  g <- dotplot(enrichment_results, showCategory = numCategory,
+  g <- enrichplot::dotplot(enrichment_results, showCategory = numCategory,
                title = paste0(filename, "-GO Enrichment Analysis"))
   
   save_it(g, outpath, paste0(filename, "-enrichGO"),
