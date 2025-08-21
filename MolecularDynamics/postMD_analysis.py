@@ -67,70 +67,69 @@ def RMSD(ref, mobile, **kwargs):
         mobile.atoms.write(writefile)
     return R, rmsd
     
-
-def plot_rmsd(xvglist, xticklabel=None, yticklabel=None, 
+def plot_rmsd(xvglist, xticklabel=None, yticklabel=None, lw=1, 
               xlimit=None, ylimit=None, fontsize=12, figsize=None, slide=1000, label=None,
-             col=None, title="RMSD", savepath=None, outname=None, leg_loc="best", ticklabel_rotate=90):
+              col=None, title="RMSD", savepath=None, outname=None, leg_loc="best", ticklabel_rotate=90):
+
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import FormatStrFormatter
+    import os
+
+    fig, ax = plt.subplots(1, figsize=figsize)
+    publication_style(fontsize=fontsize)
     
-    """
-    Plot the RMSd of two systems
-    :param slide, to convert the time points to ns scale
-    :param: xvglist: list of xvg files to plot
-    """
-    #fig, ax = plt.subplots(1,figsize=(3.33,2.06))
-    fig, ax = plt.subplots(1,figsize=figsize)
-    for n,data in enumerate(xvglist):
-        publication_style(fontsize=fontsize)
-        #x1 = data[0][1:][::slide]/1000  # converting in us scale
+    # Plot all curves
+    for n, data in enumerate(xvglist):
         x1 = data[0][1:][::slide]
         y1 = data[1][1:][::slide]*10
-        #print(len(x1), len(y1)) 
-        
+
         if col is not None:
-            ax.plot(x1, y1, label=label[n], color=col[n])
+            ax.plot(x1, y1, label=label[n], color=col[n], linewidth=lw)
         else:
-            ax.plot(x1, y1, label=label[n])
-        x_formatter = FixedFormatter([str(i) for i in xticklabel])
-        y_formatter = FixedFormatter([str(i) for i in yticklabel])
-        x_locator = FixedLocator(xticklabel)
-        y_locator = FixedLocator(yticklabel)
-        ax.xaxis.set_major_formatter(x_formatter)
-        ax.yaxis.set_major_formatter(y_formatter)
-        ax.xaxis.set_major_locator(x_locator)
-        ax.yaxis.set_major_locator(y_locator)
-        ax.tick_params(axis='x', labelrotation=ticklabel_rotate)
-        
-        ax.set_xlabel(r"Time (ns)", fontsize=fontsize+2)
-        ax.set_ylabel(r"RMSD ($\mathrm{\AA}$)", fontsize=fontsize+2)
-        ax.set_title(title)
-        ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
-        
-        if xlimit is not None:
-            ax.set_xlim(xlimit[0], xlimit[1])
-        else:
-            ax.set_xlim(x1.min(), x1.max())
-        if ylimit is not None:
-            ax.set_ylim(ylimit[0], ylimit[1])
-        else:
-            ax.set_xlim(y1.min(), y1.max())
-        box = ax.get_position()
-        ax.set_position([box.x0, box.y0, box.width * 0.8, box.height])
-        #leg = ax.legend(loc=leg_loc, bbox_to_anchor=(0.5, 0.5), frameon=False)
-        leg = ax.legend(loc=leg_loc, frameon=False)
-        for line in leg.get_lines():
-            line.set_linewidth(3.0)
-        #ax.legend(frameon=False)
+            ax.plot(x1, y1, label=label[n], linewidth=lw)
+    
+    # Now set axis ticks and labels ONCE, after all lines are drawn
+    if xticklabel is not None:
+        ax.set_xticks(xticklabel)
+        ax.set_xticklabels([str(x) for x in xticklabel], rotation=ticklabel_rotate)
+    if yticklabel is not None:
+        ax.set_yticks(yticklabel)
+        ax.set_yticklabels([str(y) for y in yticklabel])
+
+    ax.set_xlabel(r"Time (ns)", fontsize=fontsize+2)
+    ax.set_ylabel(r"RMSD ($\mathrm{\AA}$)", fontsize=fontsize+2)
+    ax.set_title(title)
+    ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
+
+    if xlimit is not None:
+        ax.set_xlim(xlimit[0], xlimit[1])
+    else:
+        # take min/max of first x1 only
+        ax.set_xlim(x1.min(), x1.max())
+    if ylimit is not None:
+        ax.set_ylim(ylimit[0], ylimit[1])
+    else:
+        ax.set_ylim(y1.min(), y1.max())
+
+    box = ax.get_position()
+    ax.set_position([box.x0, box.y0, box.width * 0.8, box.height])
+    leg = ax.legend(loc=leg_loc, ncol=2,frameon=False)
+    for line in leg.get_lines():
+        line.set_linewidth(3.0)
+
     if len(xvglist) != len(label):
-        logging.WARNING("Number of labels is not equal to the number of line plots given")
+        import logging
+        logging.warning("Number of labels is not equal to the number of line plots given")
     if figsize is None:
-        fig.set_size_inches(width, height)
+        fig.set_size_inches(6, 4)  # fallback
+
     fig.tight_layout()
     if outname is not None:
-        fig.savefig(path.join(savepath,f"{outname}.pdf"))
+        fig.savefig(os.path.join(savepath, f"{outname}.pdf"))
     plt.show()
 
 def read_rmsd_xvg(file, skiplines=18):
-    _read = pd.read_csv(file, skiprows=skiplines, header=None, delim_whitespace=True, engine='python')
+    _read = pd.read_csv(file, skiprows=skiplines, header=None, sep='\s+', engine='python')
     return _read
 
 def read_rmsd_xvg_list(filelist, skiplines=18):
@@ -143,73 +142,64 @@ def read_rmsf_xvg(filename):
     _read = pd.read_csv(filename, skiprows=17, header=None, delim_whitespace=True, engine='python')
     return _read
 
-def plot_rmsf(filename,
-              col='blue',
-              outname=None,
-              xlimit=None,
-              ylimit=None,
-              fontsize=12,
-              label=None,
-              ax=None,
-              xtick_label_spacing=1,
-              savepath='.'):
-    """
-    Plot the RMSF of one system from an XVG file with properly aligned major and minor ticks.
+def plot_rmsf(
+    rmsf_list,
+    xticklabel=None,
+    yticklabel=None,
+    xlimit=None,
+    ylimit=None,
+    fontsize=12,
+    figsize=None,
+    ticklabel_rotate=90,
+    title="RMSF",
+    label=None,
+    outname=None,
+    savepath=".",
+    leg_loc="best",
+    colors=None
+):
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import FormatStrFormatter
+    import numpy as np
+    import os
 
-    Parameters:
-        filename (str): Path to the XVG file.
-        col (str): Line color.
-        outname (str, optional): Base name for saved figure (without extension).
-        xlimit (tuple, optional): Limits for the x-axis.
-        ylimit (tuple, optional): Limits for the y-axis.
-        fontsize (int): Base font size for publication style.
-        label (str, optional): Legend label.
-        ax (matplotlib.axes.Axes, optional): Axis to plot on.
-        xtick_label_spacing (int): Interval for major tick labels (every Nth point).
-        savepath (str): Directory to save the figure.
-    Returns:
-        matplotlib.axes.Axes: The axis with the plot.
-    """
-    # Apply publication style
-    publication_style(fontsize=fontsize)
+    if colors is None:
+        # Assign default color cycle if not provided
+        colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
 
-    # Read data
-    data = read_rmsf_xvg(filename)
-    # Convert x-values to numeric array (residue IDs)
-    x1 = pd.to_numeric(data[0], errors='coerce').to_numpy()
-    # RMSF values converted to Angstroms
-    y1 = data[1].to_numpy() * 10
+    fig, ax = plt.subplots(figsize=figsize if figsize else (10, 4))
 
-    # Create figure/axis if not supplied
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(10, 4))
-    else:
-        fig = ax.figure
+    for i, data in enumerate(rmsf_list):
+        x = data.iloc[:, 0].values
+        y = data.iloc[:, 1].values * 10  # nm to Å
+        col = colors[i % len(colors)]
+        lab = label[i] if label is not None else f"System {i+1}"
+        ax.plot(x, y, label=lab, linewidth=2, color=col)
 
-    # Plot RMSF
-    ax.plot(x1, y1, label=label, linewidth=2, color=col)
-
-    # Labels and formatting
     ax.set_xlabel("Residue", fontsize=fontsize+2)
-    ax.set_ylabel(r"RMSF ($\text{\AA}$)", fontsize=fontsize+2)
+    ax.set_ylabel(r"RMSF ($\mathrm{\AA}$)", fontsize=fontsize+2)
+    ax.set_title(title)
     ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
 
-    # Apply axis limits if provided
+    if xticklabel is not None:
+        ax.set_xticks(xticklabel)
+        ax.set_xticklabels([str(x) for x in xticklabel], rotation=ticklabel_rotate)
+    if yticklabel is not None:
+        ax.set_yticks(yticklabel)
+        ax.set_yticklabels([str(y) for y in yticklabel])
+
     if xlimit is not None:
-        ax.set_xlim(*xlimit)
+        ax.set_xlim(xlimit)
     if ylimit is not None:
-        ax.set_ylim(*ylimit)
+        ax.set_ylim(ylimit)
 
-    # Legend
-    if label:
-        ax.legend(frameon=False)
-
-    # Save figure
+    ax.legend(loc=leg_loc, frameon=False)
+    fig.tight_layout()
     if outname is not None:
-        fig.tight_layout()
+        if not os.path.exists(savepath):
+            os.makedirs(savepath)
         fig.savefig(os.path.join(savepath, f"{outname}.pdf"))
-
-    return ax
+    return(ax)
 
 def get_filepath(basepath, protein, filename):
     xvgpath = path.join(basepath, protein)
