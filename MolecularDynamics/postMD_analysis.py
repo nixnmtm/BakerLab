@@ -66,7 +66,182 @@ def RMSD(ref, mobile, **kwargs):
         mobile.atoms.translate(ref_sel.center_of_mass())
         mobile.atoms.write(writefile)
     return R, rmsd
+
+def plot_rmsf(
+    rmsf_list,
+    xticklabel=None,
+    yticklabel=None,
+    xlimit=None,
+    ylimit=None,
+    fontsize=12,
+    figsize=None,
+    ticklabel_rotate=90,
+    title="RMSF",
+    label=None,
+    outname=None,
+    savepath=".",
+    leg_loc="best",
+    colors=None
+):
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import FormatStrFormatter
+    import numpy as np
+    import os
+
+    if colors is None:
+        # Assign default color cycle if not provided
+        colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+
+    fig, ax = plt.subplots(figsize=figsize if figsize else (10, 4))
+
+    for i, data in enumerate(rmsf_list):
+        x = data.iloc[:, 0].values
+        y = data.iloc[:, 1].values * 10  # nm to Å
+        col = colors[i % len(colors)]
+        lab = label[i] if label is not None else f"System {i+1}"
+        ax.plot(x, y, label=lab, linewidth=2, color=col)
+
+    ax.set_xlabel("Residue", fontsize=fontsize+2)
+    ax.set_ylabel(r"RMSF ($\mathrm{\AA}$)", fontsize=fontsize+2)
+    ax.set_title(title)
+    ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
+
+    if xticklabel is not None:
+        ax.set_xticks(xticklabel)
+        ax.set_xticklabels([str(x) for x in xticklabel], rotation=ticklabel_rotate)
+    if yticklabel is not None:
+        ax.set_yticks(yticklabel)
+        ax.set_yticklabels([str(y) for y in yticklabel])
+
+    if xlimit is not None:
+        ax.set_xlim(xlimit)
+    if ylimit is not None:
+        ax.set_ylim(ylimit)
+
+    ax.legend(loc=leg_loc, ncol=2, frameon=False)
+    fig.tight_layout()
+    if outname is not None:
+        if not os.path.exists(savepath):
+            os.makedirs(savepath)
+        fig.savefig(os.path.join(savepath, f"{outname}.pdf"))
+    return(ax)
+
     
+def plot_rmsd_traces_ci(
+    baseP, protein, systems, runs, filename,
+    xticklabel=None, yticklabel=None,
+    slide=10, xlimit=(0,200), ylimit=None,
+    figsize=(9,5), fontsize=24, ticklabel_rotate=0,
+    title=None, savepath=None, outname=None, leg_loc="best",
+    cols=None, multiply_y_by_10=True, skiplines=18,
+    publication_style_fn=None, alpha_traces=0.25, lw_traces=1.0, lw_mean=2.8
+):
+    """
+    Plot per-run RMSD traces (faint) + mean ± 95% CI (bold/shaded) per system.
+
+    Assumes all runs share the same time grid (your case: 0..200 ns, 0.01 ns step).
+    Uses your existing postMD.read_rmsd_xvg to load data.
+    """
+    import os
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import FormatStrFormatter
+
+    # collect traces for each system across runs
+    # traces_by_system[sys] = [(t, y), (t, y), ...]  # one per run
+    traces_by_system = {}
+    for sys in systems:
+        traces = []
+        for run in runs:
+            df = postMD.read_rmsd_xvg(
+                os.path.join(baseP, protein, "md", sys, f"prod_{run}", filename),
+                skiplines=skiplines
+            )
+            t = df.iloc[:,0].to_numpy()   # time (already ns in your files)
+            y = df.iloc[:,1].to_numpy()   # rmsd (likely nm)
+            # match your previous behavior: drop first row, decimate by slide, convert nm->Å if requested
+            t = t[1::slide]
+            y = (y * 10.0 if multiply_y_by_10 else y)[1::slide] if len(df)>1 else y
+            traces.append((t, y))
+        traces_by_system[sys] = traces
+
+    # sanity: ensure identical time grids across runs (per system)
+    for sys, traces in traces_by_system.items():
+        t0 = traces[0][0]
+        for (t, _) in traces[1:]:
+            if len(t) != len(t0) or not np.allclose(t, t0):
+                raise ValueError(f"Time grids differ among runs for system '{sys}'. "
+                                 "This function assumes identical grids.")
+
+    # plotting
+    fig, ax = plt.subplots(1, figsize=figsize)
+    if publication_style_fn is not None:
+        publication_style_fn(fontsize=fontsize)
+
+    # small-sample t criticals for 95% CI
+    tcrit_table = {2: 12.71, 3: 4.30, 4: 3.18, 5: 2.78, 6: 2.57, 7: 2.45,
+                   8: 2.36, 9: 2.31, 10: 2.26}
+
+    for i, sys in enumerate(systems):
+        traces = traces_by_system[sys]
+        tgrid = traces[0][0]
+        Y = np.vstack([y for (_, y) in traces])  # shape [n_runs, n_time]
+
+        # faint per-run traces
+        for y in Y:
+            if cols is not None:
+                ax.plot(tgrid, y, alpha=alpha_traces, linewidth=lw_traces, color=cols[i])
+            else:
+                ax.plot(tgrid, y, alpha=alpha_traces, linewidth=lw_traces)
+
+        # mean ± CI
+        m = Y.mean(axis=0)
+        n = Y.shape[0]
+        if n > 1:
+            s = Y.std(axis=0, ddof=1)
+            tcrit = 1.96 if n >= 30 else tcrit_table.get(n, 2.20)
+            half = tcrit * s / np.sqrt(n)
+            lo, hi = m - half, m + half
+        else:
+            lo = hi = m
+
+        if cols is not None:
+            ax.fill_between(tgrid, lo, hi, alpha=0.20, linewidth=0, color=cols[i])
+            ax.plot(tgrid, m, linewidth=lw_mean, label=sys, color=cols[i])
+        else:
+            ax.fill_between(tgrid, lo, hi, alpha=0.20, linewidth=0)
+            ax.plot(tgrid, m, linewidth=lw_mean, label=sys)
+
+    # axes, ticks, labels
+    if xticklabel is not None:
+        ax.set_xticks(xticklabel)
+        ax.set_xticklabels([str(x) for x in xticklabel], rotation=ticklabel_rotate)
+    if yticklabel is not None:
+        ax.set_yticks(yticklabel)
+        ax.set_yticklabels([str(y) for y in yticklabel])
+
+    ax.set_xlabel("Time (ns)", fontsize=fontsize+2)
+    ax.set_ylabel(r"RMSD ($\mathrm{\AA}$)" if multiply_y_by_10 else "RMSD (nm)", fontsize=fontsize+2)
+    ax.set_title(title or f"{protein.upper()} RMSD (mean ± 95% CI)")
+    ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
+
+    if xlimit is not None:
+        ax.set_xlim(*xlimit)
+    if ylimit is not None:
+        ax.set_ylim(*ylimit)
+
+    ax.legend(loc=leg_loc, frameon=False)
+    ax.margins(x=0)
+    ax.grid(True, alpha=0.2)
+    fig.tight_layout()
+
+    if savepath and outname:
+        os.makedirs(savepath, exist_ok=True)
+        fig.savefig(os.path.join(savepath, f"{outname}.pdf"))
+
+    plt.show()
+
+
 def plot_rmsd(xvglist, xticklabel=None, yticklabel=None, lw=1, 
               xlimit=None, ylimit=None, fontsize=12, figsize=None, slide=1000, label=None,
               col=None, title="RMSD", savepath=None, outname=None, leg_loc="best", ticklabel_rotate=90):
@@ -503,3 +678,4 @@ def plot_contact_difference_interactive(contact_WT, contact_MUT, resids_x, resid
     fig.show()
 
     return diff_matrix
+
