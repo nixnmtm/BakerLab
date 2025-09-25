@@ -1,3 +1,31 @@
+import scanpy as sc, anndata as ad
+
+from anndata.io import read_csv
+
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+from matplotlib.backends.backend_pdf import PdfPages
+
+import os, sys
+import os.path as path
+
+import numpy as np
+import pandas as pd
+
+import warnings
+
+from scipy import sparse
+from scipy.io import mmread
+from scipy.sparse import csc_matrix, csr_matrix
+
+import cell2location, scvi, torch
+
+def infer_condition(sample_name: str) -> str:
+    s = sample_name.upper()
+    if s.startswith("WT"):  return "WT"
+    if s.startswith("MGB"): return "MYOCD_mutant"
+    return "unknown"
+
 def read_and_qc(sample_name, path=None):
     r""" This function reads the data for one 10X spatial experiment into the anndata object.
     It also calculates QC metrics. Modify this function if required by your workflow.
@@ -16,7 +44,6 @@ def read_and_qc(sample_name, path=None):
     adata.obs["condition"] = infer_condition(sample_name)
     
     # Calculate QC metrics
-    from scipy.sparse import csr_matrix
     adata.X = adata.X.toarray()
     sc.pp.calculate_qc_metrics(adata, inplace=True)
     adata.X = csr_matrix(adata.X)
@@ -184,6 +211,20 @@ def plot_visium_obs_grid(
 
     plt.tight_layout()
     return fig, axes
+
+def save_obs_grid_pdf(
+    adata_vis, samples, obs_cols, sample_mapping, out_pdf, rows_per_page=3, **kwargs
+):
+    """Paginate long obs_cols lists into a multi-page PDF."""
+    with PdfPages(out_pdf) as pdf:
+        for i in range(0, len(obs_cols), rows_per_page):
+            batch = obs_cols[i:i+rows_per_page]
+            fig, _ = plot_visium_obs_grid(adata_vis, samples, batch, sample_mapping, **kwargs)
+            fig.suptitle(f"{i+1}-{i+len(batch)} / {len(obs_cols)}", y=0.995, fontsize=10)
+            pdf.savefig(fig, bbox_inches="tight")
+            plt.close(fig)
+    print(f"Saved: {out_pdf}")
+
 
 def compare_symbol_vs_ensembl(adata_ref, adata_vis, sym2ensemble, symbol_col="SYMBOL", ensembl_col="ENSEMBL"):
     """
