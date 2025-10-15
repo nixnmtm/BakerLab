@@ -6,6 +6,7 @@ from anndata.io import read_csv
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib import cm, colors
 
 import os, sys
 import os.path as path
@@ -649,7 +650,9 @@ def plot_spatial_pies_c2lprop(
     label_min_margin=0.10,
     label_min_total=None,
     write_labels=False,
-    label_prefix="spot",           # writes e.g. spot_label, spot_label_frac, ...
+    label_prefix="spot",          # writes e.g. spot_label, spot_label_frac, ...,
+    savepath=None,
+    savefile=None
 ):
     """
     Pies reflect true per-spot proportions:
@@ -796,5 +799,519 @@ def plot_spatial_pies_c2lprop(
                       bbox_to_anchor=(1.02, 1.0), loc="upper left", frameon=False)
 
         fig.tight_layout()
-
+        if savefile is not None and savepath is not None:
+            plt.savefig(savepath / savefile, dpi=300)
+            plt.close()
+        
     return fig, ax, frac_drawn_df, labels_df
+
+def c2l_abundance_by_compartment_genotype_sectionwise(
+    adata,
+    meta_data: pd.DataFrame,           # columns: sample_id, barcode_norm, region
+    *,
+    cols=None,                         # list of 'c2l_*' names to include; if None, auto from source
+    flavor="q05",                      # 'q05' | 'mean' | 'q95'
+    ensure_flavor=False,               # auto-build .obsm flavor if missing (no .obs writes)
+    map_df=None,                       # required if ensure_flavor=True
+    aggregate_fn=None,                 # function handle to aggregate_c2l_groups_refined
+    sample_id_col="sample_id",
+    barcode_col="barcode_norm",
+    region_col="region",
+    compartments_order=None,           # e.g. ["Outer","Middle","Inner","Umblical"]
+    genotype_key="genotype",
+    genotype_order=None,               # e.g. ["WT","mutant"]
+    section_key="section_id",
+    exclude_sections=None
+):
+    """
+    Section-equalized absolute abundance per (compartment, genotype).
+
+    Steps:
+      1) Choose aggregated c2l matrix (prefer .obsm 'c2l_{flavor}_cell_abundance_w_sf').
+      2) Map each spot to a compartment (region) via meta_data (sample_id + barcode_norm).
+      3) For EACH section_id: mean abundance per (compartment, cell).
+      4) For EACH genotype: average the section-level tables (equal weight per section).
+
+    Returns:
+      tables_by_genotype: dict[genotype] -> DataFrame (rows=cells, cols=compartments)
+      per_section_tables: dict[section_id] -> DataFrame (rows=cells, cols=compartments)
+      used_source: string describing which source matrix was used
+    """
+
+    # --- optionally ensure requested flavor exists in .obsm ---
+    obsm_key_pref = f"c2l_{flavor}_cell_abundance_w_sf"
+    if ensure_flavor and obsm_key_pref not in adata.obsm:
+        if aggregate_fn is None or map_df is None:
+            raise ValueError("ensure_flavor=True requires aggregate_fn and map_df.")
+        aggregate_fn(
+            adata, map_df, prefix="c2l_",
+            write_to_obs=False,  # do not touch .obs
+            obs_from=None
+        )
+
+    # --- choose source (prefer requested .obsm, else any c2l_* in .obsm, else .obs c2l_*) ---
+    POST, used_source = None, None
+    if obsm_key_pref in adata.obsm:
+        POST, used_source = adata.obsm[obsm_key_pref], obsm_key_pref
+    if POST is None:
+        for k in adata.obsm.keys():
+            if isinstance(k, str) and k.startswith("c2l_") and k.endswith("cell_abundance_w_sf"):
+                POST, used_source = adata.obsm[k], k
+                break
+    if POST is None:
+        obs_cols = [c for c in adata.obs.columns if str(c).startswith("c2l_")]
+        if obs_cols:
+            POST, used_source = adata.obs[obs_cols].copy(), "obs:c2l_*"
+    if POST is None:
+        raise ValueError("No aggregated c2l matrices found. Consider ensure_flavor=True.")
+
+    if not isinstance(POST, pd.DataFrame):
+        POST = pd.DataFrame(POST, index=adata.obs_names)
+    # standardize col names to start with 'c2l_' for matching
+    POST.columns = pd.Index([c if str(c).startswith("c2l_") else f"c2l_{c}" for c in POST.columns])
+
+    # subset/order requested cell IDs
+    if cols is None:
+        use_cols = list(POST.columns)
+    else:
+        use_cols = [c for c in cols if c in POST.columns]
+        if not use_cols:
+            raise ValueError(f"None of requested `cols` found in source ({used_source}).")
+    POST = POST[use_cols].clip(lower=0)
+
+    # optionally drop excluded sections
+    obs_sub = adata.obs
+    if exclude_sections:
+        keep = ~obs_sub[section_key].astype(str).isin(exclude_sections)
+        POST = POST.loc[keep]
+        obs_sub = obs_sub.loc[keep]
+
+    # ensure required obs keys
+    for k in (section_key, genotype_key):
+        if k not in obs_sub.columns:
+            raise KeyError(f"adata.obs missing '{k}'")
+
+    # --- map spots → region via composite key (sample_id + sep + barcode_norm) ---
+    def _best_sep(F_idx: pd.Index, msub: pd.DataFrame):
+        seps = ("_","-","","|",":")
+        fset = set(F_idx.astype(str))
+        best, hits = None, -1
+        for s in seps:
+            comp = (msub[sample_id_col].astype(str) + s + msub[barcode_col].astype(str)).values
+            h = np.sum(np.isin(comp, list(fset)))
+            if h > hits:
+                best, hits = s, h
+        if hits == 0:
+            raise ValueError("Meta rows did not match spot indices; check sample_id/barcode_norm.")
+        return best
+
+    present_sections = set(obs_sub[section_key].astype(str))
+    m = meta_data[meta_data[sample_id_col].astype(str).isin(present_sections)].copy()
+    sep = _best_sep(POST.index, m)
+    m["__key"] = m[sample_id_col].astype(str) + sep + m[barcode_col].astype(str)
+    lut = m.set_index("__key")[region_col].astype(str)
+
+    regions = pd.Series(POST.index.astype(str), index=POST.index).map(lut)
+    mask = regions.notna()
+    if not mask.any():
+        raise ValueError("Regions could not be mapped. Check meta_data join columns.")
+    POST = POST.loc[mask]
+    regions = regions.loc[mask]
+
+    # pull section + genotype aligned to POST rows
+    sections = obs_sub.loc[POST.index, section_key].astype(str)
+    genos    = obs_sub.loc[POST.index, genotype_key].astype(str)
+
+    # determine column (compartment) order
+    if compartments_order is None:
+        compartments_order = list(pd.unique(regions))
+
+    # --- PER-SECTION means: for each section, average spots inside each region ---
+    per_section_tables = {}  # section_id -> DataFrame (rows=cells, cols=compartments)
+    for sec, idx in sections.groupby(sections).groups.items():
+        F_sec = POST.loc[idx]
+        reg_sec = regions.loc[idx]
+
+        # group by region, mean across spots, then transpose to cells×regions
+        reg_comp = (F_sec.assign(_reg=reg_sec.values)
+                          .groupby("_reg").mean(numeric_only=True)
+                          .T)  # rows=cells, cols=regions
+
+        # enforce dense, ordered columns
+        for c in compartments_order:
+            if c not in reg_comp.columns:
+                reg_comp[c] = 0.0
+        reg_comp = reg_comp[compartments_order]
+        # enforce full row set/order
+        reg_comp = reg_comp.reindex(use_cols).fillna(0.0)
+
+        per_section_tables[sec] = reg_comp
+
+    # --- EQUAL-WEIGHT across sections WITHIN genotype ---
+    if genotype_order is None:
+        genotype_order = list(pd.unique(genos))
+
+    # collect list of sections per genotype
+    sec2geno = sections.groupby(sections).agg(lambda s: genos.loc[s.index[0]])
+    geno_to_secs = {g: [s for s, gg in sec2geno.items() if gg == g] for g in genotype_order}
+
+    tables_by_genotype = {}
+    for g in genotype_order:
+        secs = geno_to_secs.get(g, [])
+        if not secs:
+            continue
+        # simple (unweighted) mean of the section tables
+        stack = np.stack([per_section_tables[s].to_numpy(float) for s in secs], axis=2)  # cells × comps × n_sec
+        mean_gc = np.nanmean(stack, axis=2)
+        df_g = pd.DataFrame(mean_gc, index=use_cols, columns=compartments_order)
+        tables_by_genotype[g] = df_g
+
+    return tables_by_genotype, per_section_tables, used_source
+
+
+def plot_genotype_compartment_heatmaps(
+    tables_by_genotype: dict,
+    *,
+    strip_prefix="c2l_",
+    cmap="viridis",
+    zscore_rows=False,          # False recommended for absolute comparability
+    figsize_per=(6, 5),
+    suptitle="Cell2location abundance per compartment (section-equalized)"
+):
+    # determine shared vmin/vmax across genotypes for fair comparison
+    mats = [df.to_numpy(float) for df in tables_by_genotype.values()]
+    big = np.hstack(mats) if mats else np.zeros((1,1))
+    if zscore_rows:
+        vmin = vmax = None
+    else:
+        vmax = np.nanmax(big) if np.isfinite(big).any() else 1.0
+        vmin = 0.0
+
+    n = len(tables_by_genotype)
+    fig, axes = plt.subplots(1, n, figsize=(figsize_per[0]*n, figsize_per[1]), squeeze=False)
+    axes = axes[0]
+
+    for ax, (geno, df) in zip(axes, tables_by_genotype.items()):
+        disp = df.copy()
+        if strip_prefix:
+            disp.index = [i.replace(strip_prefix, "") for i in disp.index]
+        data = disp.to_numpy(float)
+
+        if zscore_rows:
+            mu = np.nanmean(data, axis=1, keepdims=True)
+            sd = np.nanstd(data, axis=1, ddof=1, keepdims=True); sd[sd==0]=1.0
+            data = (data - mu) / sd
+            vmax_local = np.nanmax(np.abs(data)) if np.isfinite(data).any() else 1.0
+            norm = colors.TwoSlopeNorm(vmin=-vmax_local, vcenter=0.0, vmax=vmax_local)
+            cmap_use = "bwr"
+        else:
+            norm = None
+            cmap_use = cmap
+
+        im = ax.imshow(data, aspect="auto", cmap=cmap_use, norm=norm, vmin=None if zscore_rows else vmin, vmax=None if zscore_rows else vmax)
+        ax.set_title(geno)
+        ax.set_xlabel("Compartment")
+        ax.set_xticks(np.arange(disp.shape[1])); ax.set_xticklabels(disp.columns, rotation=0)
+        ax.set_yticks(np.arange(disp.shape[0])); ax.set_yticklabels(disp.index)
+
+
+    # shared colorbar
+    cax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
+    if zscore_rows:
+        sm = axes[-1].images[-1]
+        fig.colorbar(sm, cax=cax, label="Row z-score")
+    else:
+        import matplotlib.cm as cm
+        sm = cm.ScalarMappable(norm=colors.Normalize(vmin=vmin, vmax=vmax), cmap=cmap)
+        sm.set_array([])
+        fig.colorbar(sm, cax=cax, label="Posterior abundance (mean)")
+
+    fig.suptitle(suptitle, y=0.98)
+    fig.tight_layout(rect=[0, 0, 0.9, 0.96])
+    return fig, axes
+
+# Δ (mutant − WT) from section-equalized tables
+def plot_delta_heatmap_from_genotype_tables(tables_by_geno, *,
+                                            wt_label="WT", mut_label="mutant",
+                                            strip_prefix="c2l_", cmap="bwr",
+                                            figsize=(8,6), title=None):
+    delta = tables_by_geno[mut_label] - tables_by_geno[wt_label]
+    disp = delta.copy()
+    if strip_prefix:
+        disp.index = [i.replace(strip_prefix, "") for i in disp.index]
+    data = disp.to_numpy(float)
+    vmax = np.nanmax(np.abs(data)) if np.isfinite(data).any() else 1.0
+    norm = colors.TwoSlopeNorm(vmin=-vmax, vcenter=0.0, vmax=vmax)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    im = ax.imshow(data, aspect="auto", cmap=cmap, norm=norm)
+    ax.set_yticks(np.arange(disp.shape[0])); ax.set_yticklabels(disp.index)
+    ax.set_xticks(np.arange(disp.shape[1])); ax.set_xticklabels(disp.columns, rotation=0)
+    ax.set_xlabel("Compartment"); ax.set_ylabel("Cell type")
+    ax.set_title(title or f"Δ proportion ({mut_label} − {wt_label}) (section-equalized)")
+    for spine in ['top', 'bottom', 'left', 'right']:
+        ax.spines[spine].set_linewidth(2)
+    ax.tick_params(axis='both', which='major', width=2.5, length=6)
+    ax.tick_params(axis='both', which='minor', width=0.75, length=3)
+    cbar = fig.colorbar(im, ax=ax, pad=0.02)
+    cbar.ax.tick_params(length=6, width=3)
+    cbar.set_label("Δ posterior abundance (mean, section-equalized)")
+    plt.tight_layout()
+    return delta, fig, ax
+
+# dependent on pieplot proportions
+def delta_lollipop_from_cellprop(
+    cell_prop: dict,                 # {'wt1': F_drawn_df, 'wt2': F_drawn_df, 'mgb2': F_drawn_df}
+    slide_to_geno: dict,             # {"wt1":"WT","wt2":"WT","mgb2":"mutant"}
+    *,
+    exclude_slides=None,
+    wt_label="WT",
+    mut_label="mutant",
+    prefix_to_remove="c2l_",
+    title="Δ proportion (mutant − WT)",
+    figsize=(7,6),
+    cmap_name="bwr",                 # used only if base_colors not supplied or for fallbacks
+    vmin=None, vmax=None,
+    base_colors: dict=None,          # NEW: per–cell type palette, e.g. {"Fib2":"lightblue", "detSMC":"lime", ...}
+    default_color="gray"             # used if a type not in base_colors and no cmap fallback
+):
+    """
+    Aggregates per-slide compositions (equal weight per slide), computes delta (mutant − WT),
+    and plots a lollipop. If `base_colors` is provided, each stick/marker is colored by that palette.
+    Otherwise, a centered blue→white→red colormap is used.
+    """
+    import matplotlib
+
+    # 0) optional exclusions
+    if exclude_slides:
+        cell_prop = {k: v for k, v in cell_prop.items() if k not in set(exclude_slides)}
+
+    # 1) per-slide composition (mean over spots; rows sum to 1 across selected cols)
+    slide_comp = {}
+    for slide, F_drawn in cell_prop.items():
+        if not isinstance(F_drawn, pd.DataFrame):
+            F_drawn = pd.DataFrame(F_drawn)
+        slide_comp[slide] = F_drawn.mean(axis=0)
+    slide_comp = pd.DataFrame(slide_comp).T  # rows=slides, cols=cell types
+
+    # 2) map slides → genotype (equal weight per slide)
+    try:
+        slide_comp["genotype"] = [slide_to_geno[s] for s in slide_comp.index]
+    except KeyError as e:
+        raise KeyError(f"Slide '{e.args[0]}' missing in slide_to_geno mapping.") from e
+
+    present = set(slide_comp["genotype"].unique())
+    if not {wt_label, mut_label}.issubset(present):
+        raise ValueError(f"Need both genotypes '{wt_label}' and '{mut_label}' present. Found: {present}")
+
+    by_geno_mean = slide_comp.groupby("genotype").mean(numeric_only=True)
+    delta = (by_geno_mean.loc[mut_label] - by_geno_mean.loc[wt_label])
+
+    # ---------- plotting prep ----------
+    # Clean labels for display
+    vals = delta.copy()
+    if prefix_to_remove:
+        clean_names = [s.replace(prefix_to_remove, "") for s in vals.index]
+    else:
+        clean_names = list(vals.index)
+    vals.index = clean_names
+    vals = vals.sort_values()
+    y = np.arange(len(vals))
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    if base_colors:  # --- categorical coloring from palette ---
+        # Build color list per row using clean names
+        color_list = []
+        for ct in vals.index:
+            if ct in base_colors:
+                color_list.append(base_colors[ct])
+            else:
+                # try to map back to original key with prefix if user palette uses original names
+                orig = (prefix_to_remove + ct) if prefix_to_remove else ct
+                color_list.append(base_colors.get(orig, default_color))
+        # Draw
+        for yi, v, c in zip(y, vals.values, color_list):
+            ax.hlines(yi, 0, v, color=c, linewidth=3)
+            ax.plot(v, yi, "o", color=c, markersize=6)
+        show_colorbar = False
+
+    else:  # --- diverging cmap centered at 0 (fallback) ---
+        absmax = float(np.nanmax(np.abs(vals.values))) if len(vals) else 1.0
+        cmap = matplotlib.colormaps[cmap_name]
+        if vmin is None and vmax is None:
+            norm = colors.TwoSlopeNorm(vmin=-absmax, vcenter=0.0, vmax=absmax)
+        else:
+            norm = colors.TwoSlopeNorm(vmin=vmin, vcenter=0.0, vmax=vmax)
+        colors_arr = cmap(norm(vals.values))
+        for yi, v, c in zip(y, vals.values, colors_arr):
+            ax.hlines(yi, 0, v, color=c, linewidth=2.5)
+            ax.plot(v, yi, "o", color=c, markersize=6)
+        # colorbar
+        sm = cm.ScalarMappable(norm=norm, cmap=cmap); sm.set_array([])
+        cbar = fig.colorbar(sm, ax=ax, pad=0.02)
+        cbar.set_label("Δ proportion")
+        show_colorbar = True
+
+    # axes cosmetics
+    ax.axvline(0, linestyle="--", linewidth=1, color="gray")
+    ax.set_yticks(y); ax.set_yticklabels(vals.index)
+    ax.set_xlabel(f"Δ proportion ({mut_label} − {wt_label})")
+    ax.set_title(title)
+    ax.set_ylim(-0.5, len(vals)-0.5)
+    ax.grid(False)
+    for spine in ['top', 'bottom', 'left', 'right']:
+        ax.spines[spine].set_linewidth(2)
+    ax.tick_params(axis='both', which='major', width=2.5, length=6)
+    ax.tick_params(axis='both', which='minor', width=0.75, length=3)
+    plt.tight_layout()
+
+    delta.name = f"delta_{mut_label}_minus_{wt_label}"
+    return delta.sort_values(), fig, ax
+
+def plot_delta_bars(delta, base_colors=None, prefix_to_remove="c2l_", figsize=(6,5),
+                    title="Δ proportion (mutant − WT)", sort_by_abs=True):
+    vals = delta.copy()
+    if prefix_to_remove:
+        vals.index = [s.replace(prefix_to_remove, "") for s in vals.index]
+
+    if sort_by_abs:
+        vals = vals.reindex(vals.abs().sort_values(ascending=True).index)
+
+    colors = None
+    if base_colors:
+        colors = [base_colors.get(k, base_colors.get(prefix_to_remove + k, "gray"))
+                  for k in vals.index]
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.barh(vals.index, vals.values, color=colors or "gray")
+    ax.axvline(0, color="black", lw=1)
+    ax.set_xlabel("Δ proportion (mutant − WT)")
+    ax.set_title(title)
+    plt.tight_layout()
+    return fig, ax
+
+def plot_compartment_delta_heatmap(
+    cell_prop: dict,            # {'wt1': F_drawn_df, 'wt2': F_drawn_df, 'mgb2': F_drawn_df}
+    meta_data: pd.DataFrame,    # columns: sample_id, barcode_norm, region
+    slide_to_geno: dict,        # {'wt1':'WT','wt2':'WT','mgb2':'mutant'}
+    *,
+    sample_id_col="sample_id",
+    barcode_col="barcode_norm",
+    region_col="region",
+    compartments_order=None,    # e.g. ["Inner","Middle","Outer","Umblical"]
+    wt_label="WT",
+    mut_label="mutant",
+    prefix_to_remove="c2l_",    # strip for display-only
+    figsize=(8,6)
+):
+    """
+    Builds a matrix of Δ proportion (mutant − WT) per compartment and plots a heatmap.
+    Assumes each F_drawn in cell_prop is (spots x selected_celltypes) with rows summing to 1 across selected cols.
+    Returns (delta_df, fig, ax) where delta_df rows=cell types, cols=compartments.
+    """
+
+    # --- helper: find best separator that matches F_drawn indices to meta composite keys
+    def _best_sep(F_idx: pd.Index, meta_sub: pd.DataFrame):
+        # try common seps
+        seps = ("_","-","","|",":")
+        fset = set(F_idx.astype(str))
+        best, hits = None, -1
+        for s in seps:
+            comp = (meta_sub[sample_id_col].astype(str) + s + meta_sub[barcode_col].astype(str)).values
+            h = sum((c in fset) for c in comp)
+            if h > hits:
+                best, hits = s, h
+        if hits == 0:
+            raise ValueError("Could not match any meta rows to spot indices; check sample_id/barcode_norm format.")
+        return best
+
+    # --- 1) per-slide, per-compartment compositions (mean of spot fractions within each region)
+    per_slide_region = {}
+    for slide, F in cell_prop.items():
+        F = F.copy() if isinstance(F, pd.DataFrame) else pd.DataFrame(F)
+        # subset meta_data to this slide's sample_id (the sample_id string contained in obs_names)
+        # robust approach: meta_data has explicit sample_id; use that to subset
+        # guess this slide's sample_id: any row of F index should start with sample_id + sep
+        # just filter meta_data by rows whose sample_id starts with slide (common: 'wt1-...')
+        msub = meta_data[meta_data[sample_id_col].astype(str).str.startswith(slide)].copy()
+        if msub.empty:
+            # fallback: exact match (if slide already equals sample_id)
+            msub = meta_data[meta_data[sample_id_col].astype(str) == slide].copy()
+        if msub.empty:
+            raise ValueError(f"No meta_data rows found for slide '{slide}' in column '{sample_id_col}'.")
+
+        sep = _best_sep(F.index, msub)
+        msub["__key"] = msub[sample_id_col].astype(str) + sep + msub[barcode_col].astype(str)
+        lut = msub.set_index("__key")[region_col].astype(str)
+
+        # map each spot to a region
+        r = pd.Series(F.index.astype(str)).map(lut).values
+        mask = pd.notnull(r)
+        if not mask.any():
+            raise ValueError(f"Could not map regions for slide '{slide}'. Check composite key format.")
+        F_use = F.loc[mask].copy()
+        regions = pd.Index(r[mask], name="region")
+
+        reg_comp = (
+            F_use.assign(region=regions.values)
+                .groupby("region")
+                .mean(numeric_only=True)
+        )
+        per_slide_region[slide] = reg_comp
+
+    # --- 2) aggregate per genotype to get means, then Δ = mutant − WT per compartment
+    # stack into long table: slide, region, celltype, value
+    long_rows = []
+    for slide, df in per_slide_region.items():
+        df2 = df.copy()
+        df2["slide"] = slide
+        df2["genotype"] = slide_to_geno[slide]
+        long_rows.append(df2.reset_index())
+    long_df = pd.concat(long_rows, ignore_index=True)
+
+    cell_cols = [c for c in long_df.columns if c not in {"region","slide","genotype"}]
+    regions = sorted(long_df["region"].unique()) if compartments_order is None else compartments_order
+
+    # Build delta matrix
+    delta_parts = []
+    for comp in regions:
+        sub = long_df[long_df["region"] == comp]
+        if sub.empty:
+            continue
+        mean_by_geno = sub.groupby("genotype")[cell_cols].mean(numeric_only=True)
+        if (wt_label in mean_by_geno.index) and (mut_label in mean_by_geno.index):
+            delta_col = (mean_by_geno.loc[mut_label] - mean_by_geno.loc[wt_label])
+            delta_col.name = comp
+            delta_parts.append(delta_col)
+        else:
+            # one genotype missing -> fill NaNs for that column
+            delta_parts.append(pd.Series(index=cell_cols, dtype=float, name=comp))
+
+    delta_df = pd.concat(delta_parts, axis=1)
+    # pretty row labels (display only)
+    if prefix_to_remove:
+        delta_df.index = [i.replace(prefix_to_remove, "") for i in delta_df.index]
+
+    # --- 3) plot heatmap with matplotlib (center at 0) ---
+    fig, ax = plt.subplots(figsize=figsize)
+    data = delta_df.to_numpy(dtype=float)
+    # symmetric color around 0 for fair visual comparison
+    vmax = np.nanmax(np.abs(data)) if np.isfinite(data).any() else 1.0
+    norm = colors.TwoSlopeNorm(vmin=-vmax, vcenter=0.0, vmax=vmax)
+    im = ax.imshow(data, aspect="auto", cmap="bwr", norm=norm)
+
+    # ticks & labels
+    ax.set_yticks(np.arange(delta_df.shape[0]))
+    ax.set_yticklabels(delta_df.index)
+    ax.set_xticks(np.arange(delta_df.shape[1]))
+    ax.set_xticklabels(delta_df.columns, rotation=0)
+    ax.set_xlabel("Compartment")
+    ax.set_title("Δ proportion (mutant − WT) per compartment")
+
+    # colorbar
+    cbar = fig.colorbar(im, ax=ax, pad=0.02)
+    cbar.set_label("Δ proportion")
+
+    plt.tight_layout()
+    return delta_df, fig, ax
