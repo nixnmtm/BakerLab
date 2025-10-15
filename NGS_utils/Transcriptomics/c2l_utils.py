@@ -7,6 +7,11 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib import cm, colors
+from matplotlib.patches import Wedge
+from matplotlib.colors import to_rgba
+
+import re
+from datetime import datetime
 
 import os, sys
 import os.path as path
@@ -21,9 +26,11 @@ from scipy.io import mmread
 from scipy.sparse import csc_matrix, csr_matrix
 
 import cell2location, scvi, torch
+from cell2location.plt import plot_spatial
 
 from pathlib import Path
 from typing import Optional, Tuple, Union, Dict
+
 
 def get_directory_names(path_):
     return [d for d in os.listdir(path_) if os.path.isdir(os.path.join(path_, d))]
@@ -373,7 +380,6 @@ def _exclude_mgb1(df: pd.DataFrame) -> pd.DataFrame:
     mask = ~df.index.str.split("_").str[0].str.lower().str.startswith("mgb1")
     return df.loc[mask].copy()
 
-
 def run_abundance_enrichment(
     q05_whole_embryo: DFLike,
     q05_bladder_only: DFLike,
@@ -517,8 +523,6 @@ def run_abundance_enrichment(
     }
     return summary, table
 
-from cell2location.plt import plot_spatial
-
 def make_slide_for_library(adata_vis, lib_id, sample_mapping, *, batch_key="sample", img_key="hires"):
     """
     Return a single-sample AnnData 'slide' configured so cell2location.plot_spatial uses the right image block.
@@ -617,14 +621,183 @@ def plot_visium_multicluster_per_sample(
 
     return figs if return_figs else None
 
+# ---------- internals ----------
+_PREFIX_PAT = re.compile(r'^(?:means|mean|q05|q95)_?cell_abundance_w_sf_')
 
-from matplotlib.patches import Wedge
+def _strip_c2l_prefixes(cols: pd.Index) -> pd.Index:
+    return pd.Index([_PREFIX_PAT.sub('', str(c)) for c in cols])
+
+def _ensure_df_from_obsm(adata, obsm_key: str, factor_names: list) -> pd.DataFrame:
+    X = adata.obsm[obsm_key]
+    if isinstance(X, pd.DataFrame):
+        X = X.reindex(index=adata.obs_names)
+        X.columns = _strip_c2l_prefixes(pd.Index(X.columns))
+        if set(factor_names).issubset(X.columns):
+            X = X.loc[:, factor_names]
+        elif X.shape[1] == len(factor_names):
+            X = X.copy(); X.columns = factor_names
+        else:
+            missing = [f for f in factor_names if f not in X.columns]
+            raise ValueError(f"{obsm_key}: columns don’t match factor_names; missing e.g. {missing[:10]}")
+        return X.astype(float)
+    else:
+        return pd.DataFrame(X, index=adata.obs_names, columns=factor_names).astype(float)
+
+def _available_c2l_keys(adata):
+    keys = {}
+    if "means_cell_abundance_w_sf" in adata.obsm: keys["mean"] = "means_cell_abundance_w_sf"
+    if "cell_abundance_w_sf"      in adata.obsm and "mean" not in keys:
+        keys["mean"] = "cell_abundance_w_sf"  # legacy
+    if "q05_cell_abundance_w_sf"  in adata.obsm: keys["q05"] = "q05_cell_abundance_w_sf"
+    if "q95_cell_abundance_w_sf"  in adata.obsm: keys["q95"] = "q95_cell_abundance_w_sf"
+    return keys
+
+# ---------- main (improved) ----------
+def aggregate_c2l_celltypes(
+    adata,
+    map_df,
+    *,
+    source_col="celltype_sub",
+    desired_col="c2l_celltype_sub_short",
+    flavors=("q05","mean","q95"),          # which posterior flavors to aggregate if available
+    prefix="c2l_",                         # prefix for output .obsm keys
+    write_to_obs=False,                    # default OFF (safer)
+    obs_flavor=None,                       # if writing to .obs, which single flavor to use
+    obs_suffix=False,                      # add '__{flavor}' suffix when writing to .obs
+    registry_key="c2l_group_registry"      # where to log provenance in .uns
+):
+    """
+    Aggregate c2l posteriors across fine factors into grouped cell types.
+
+    Writes to .obsm (one matrix per available flavor):
+        '{prefix}{flavor}_cell_abundance_w_sf'  e.g., 'c2l_q05_cell_abundance_w_sf'
+        columns = grouped names from `desired_col` (UNprefixed; readers can add 'c2l_' if desired)
+
+    Optionally writes one chosen flavor to .obs (NOT recommended unless you really need it).
+
+    Returns a dict with: groups mapping, written .obsm keys, and (optionally) written .obs columns.
+    """
+    # 1) inputs & mapping
+    factor_names = list(adata.uns.get("mod", {}).get("factor_names", []))
+    if not factor_names:
+        raise ValueError("Missing adata.uns['mod']['factor_names'].")
+
+    m = (map_df[[source_col, desired_col]]
+         .dropna()
+         .astype(str)
+         .drop_duplicates(subset=[source_col]))
+    groups = m.groupby(desired_col)[source_col].apply(list).to_dict()
+    if not groups:
+        raise ValueError("No groups found from map_df; check source_col / desired_col.")
+
+    # 2) which posteriors exist
+    avail = _available_c2l_keys(adata)
+    if not avail:
+        raise ValueError("No c2l matrices in .obsm (expected mean/cell_abundance_w_sf and/or q05/q95).")
+
+    # limit to requested flavors that are present
+    to_do = [(f, avail[f]) for f in flavors if f in avail]
+    if not to_do:
+        raise ValueError(f"None of requested flavors {flavors} exist. Available: {list(avail)}")
+
+    obsm_written = []
+    obs_cols_written = []
+
+    # 3) aggregate for each flavor
+    for flavor, src_key in to_do:
+        X = _ensure_df_from_obsm(adata, src_key, factor_names)  # [spots × factors]
+
+        agg = {}
+        for new_name, old_list in groups.items():
+            present = [c for c in old_list if c in X.columns]
+            if present:
+                agg[new_name] = X[present].sum(axis=1)
+        if not agg:
+            continue
+
+        agg_df = pd.DataFrame(agg, index=adata.obs_names).astype(float)
+        obsm_out = f"{prefix}{flavor}_cell_abundance_w_sf"   # e.g., 'c2l_q05_cell_abundance_w_sf'
+        adata.obsm[obsm_out] = agg_df
+        obsm_written.append(obsm_out)
+
+    # 4) optional .obs write (single flavor only, discouraged by default)
+    if write_to_obs:
+        if obs_flavor is None:
+            # pick the first actually written flavor
+            obs_flavor = next((f for f, _ in to_do), None)
+        if obs_flavor is None:
+            raise ValueError("Requested write_to_obs but no flavor available to write.")
+        key = f"{prefix}{obs_flavor}_cell_abundance_w_sf"
+        if key not in adata.obsm:
+            raise ValueError(f"Requested obs_flavor='{obs_flavor}' not aggregated into .obsm.")
+        df = adata.obsm[key]
+        cols = df.columns
+        out_cols = (cols if not obs_suffix
+                    else pd.Index([f"{c}__{obs_flavor}" for c in cols]))
+        # write with prefix in obs so they look like 'c2l_<group>'
+        obs_block = df.copy()
+        obs_block.columns = pd.Index([f"{prefix}{c}" for c in out_cols])
+        # atomic replace-insert
+        tmp = adata.obs.copy()
+        tmp[obs_block.columns] = obs_block.reindex(tmp.index)
+        adata.obs = tmp
+        obs_cols_written = list(obs_block.columns)
+
+    # 5) provenance
+    log = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "source_keys": {f: avail[f] for f, _ in to_do},
+        "obsm_written": obsm_written,
+        "wrote_obs": write_to_obs,
+        "obs_flavor": obs_flavor if write_to_obs else None,
+        "mapping_cols": {"source_col": source_col, "desired_col": desired_col},
+        "n_groups": len(groups),
+    }
+    adata.uns.setdefault(registry_key, []).append(log)
+
+    return {
+        "groups": groups,
+        "obsm_keys_written": obsm_written,
+        "obs_flavor_written": obs_flavor if write_to_obs else None,
+        "obs_cols_written": obs_cols_written,
+        "log": log,
+    }
+
+def build_grouped_palette(cols_to_show, base_colors, fallback_cmap="tab20"):
+    """
+    cols_to_show: e.g. ['c2l_Urothelial Cells','c2l_Fibroblasts1', ...]
+    base_colors:  dict keyed by group names WITHOUT 'c2l_' (spaces OK)
+    Returns dict keyed exactly by cols_to_show.
+    """
+    # normalize keys in base map (case/underscore/space agnostic)
+    def norm(s): return re.sub(r'\s+', '_', s.strip().lower())
+    norm_base = {norm(k): v for k, v in base_colors.items()}
+
+    cmap = plt.colormaps.get_cmap(fallback_cmap)
+    pal = {}
+    auto_i = 0
+    for col in cols_to_show:
+        raw = col.removeprefix("c2l_")
+        candidates = [raw, raw.replace('_',' '), raw.replace(' ','_')]
+        hit = None
+        for cand in candidates:
+            k = norm(cand)
+            if k in norm_base:
+                hit = norm_base[k]; break
+        if hit is None:
+            pal[col] = cmap(auto_i % cmap.N); auto_i += 1  # auto color if not provided
+        else:
+            pal[col] = to_rgba(hit)
+    return pal
 
 def plot_spatial_pies_c2lprop(
     adata,
     cols,                          # foreground cell types to color
     *,
     den_cols=None,                 # ALL c2l types for denominator (default: uns["mod"]["factor_names"])
+    obsm_key="c2l_q05_cell_abundance_w_sf",
+    den_from="post",                 # "post" (default) or "raw"
+    raw_obsm_key="q05_cell_abundance_w_sf",
     ax=None,
     fig=None,
     img_key="hires",
@@ -663,30 +836,49 @@ def plot_spatial_pies_c2lprop(
         - 'raw'   : before any top_n/min_display_frac (preferred for analysis)
         - 'drawn' : after display trims (to mirror the figure)
     """
-    if isinstance(cols, str):
-        cols = [cols]
-    cols = [c for c in cols if c in adata.obs.columns]
-    if not cols:
-        raise ValueError("None of the requested `cols` exist in adata.obs.")
+    
+    POST = adata.obsm[obsm_key]
+    if not isinstance(POST, pd.DataFrame):
+        POST = pd.DataFrame(POST, index=adata.obs_names)
 
-    # denominator: all c2l types
-    if den_cols is None:
-        den_cols = list(adata.uns.get("mod", {}).get("factor_names", []))
-        den_cols = [c for c in den_cols if c in adata.obs.columns]
-        if not den_cols:
-            den_cols = [c for c in adata.obs.columns if np.issubdtype(adata.obs[c].dtype, np.number)]
+    # --- denominator source ---
+    if den_from == "post":
+        if den_cols is None:
+            den_cols = list(POST.columns)
+        else:
+            missing = [c for c in den_cols if c not in POST.columns]
+            if missing:
+                raise KeyError(f"den_cols not in {obsm_key}: {missing}")
+        X_den = POST[den_cols].to_numpy(float)
 
-    # image + coords
+    elif den_from == "raw":
+        RAW = adata.obsm[raw_obsm_key]
+        if not isinstance(RAW, pd.DataFrame):
+            RAW = pd.DataFrame(RAW, index=adata.obs_names)
+        # strip standard c2l prefix once for raw matrices
+        import re
+        _pat = re.compile(r'^(?:means|mean|q05|q95)_?cell_abundance_w_sf_')
+        RAW = RAW.copy()
+        RAW.columns = pd.Index([_pat.sub('', str(c)) for c in RAW.columns])
+
+        use_den = den_cols or list(RAW.columns)
+        miss = [c for c in use_den if c not in RAW.columns]
+        if miss:
+            raise KeyError(f"den_cols not in {raw_obsm_key}: {miss}")
+        X_den = RAW[use_den].to_numpy(float)
+    else:
+        raise ValueError("den_from must be 'post' or 'raw'")
+
+    # ---- image + coordinates ----
     lib, block = next(iter(adata.uns["spatial"].items()))
     img = block.get("images", {}).get(img_key) if show_img else None
     sf = block["scalefactors"][f"tissue_{img_key}_scalef"]
     coords = adata.obsm["spatial"] * sf
 
     # --- build numerator and denominator (clip negatives) ---
-    X_num = adata.obs[cols].to_numpy(float)
+    X_num = POST[cols].to_numpy(float)
     X_num = np.nan_to_num(X_num, nan=0.0); X_num[X_num < 0] = 0.0
 
-    X_den = adata.obs[den_cols].to_numpy(float)
     X_den = np.nan_to_num(X_den, nan=0.0); X_den[X_den < 0] = 0.0
 
     den = X_den.sum(axis=1, keepdims=True)
@@ -850,25 +1042,13 @@ def c2l_abundance_by_compartment_genotype_sectionwise(
         )
 
     # --- choose source (prefer requested .obsm, else any c2l_* in .obsm, else .obs c2l_*) ---
-    POST, used_source = None, None
-    if obsm_key_pref in adata.obsm:
-        POST, used_source = adata.obsm[obsm_key_pref], obsm_key_pref
-    if POST is None:
-        for k in adata.obsm.keys():
-            if isinstance(k, str) and k.startswith("c2l_") and k.endswith("cell_abundance_w_sf"):
-                POST, used_source = adata.obsm[k], k
-                break
-    if POST is None:
-        obs_cols = [c for c in adata.obs.columns if str(c).startswith("c2l_")]
-        if obs_cols:
-            POST, used_source = adata.obs[obs_cols].copy(), "obs:c2l_*"
-    if POST is None:
-        raise ValueError("No aggregated c2l matrices found. Consider ensure_flavor=True.")
+    if obsm_key_pref not in adata.obsm:
+        raise KeyError(f"Required matrix '{obsm_key_pref}' not found in .obsm. "
+                       f"Set ensure_flavor=True or run the aggregator to create it.")
+    POST, used_source = adata.obsm[obsm_key_pref], obsm_key_pref
 
     if not isinstance(POST, pd.DataFrame):
         POST = pd.DataFrame(POST, index=adata.obs_names)
-    # standardize col names to start with 'c2l_' for matching
-    POST.columns = pd.Index([c if str(c).startswith("c2l_") else f"c2l_{c}" for c in POST.columns])
 
     # subset/order requested cell IDs
     if cols is None:
