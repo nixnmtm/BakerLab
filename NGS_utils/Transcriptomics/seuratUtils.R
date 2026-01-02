@@ -29,7 +29,8 @@ plotHeatMap <- function(df){
     scale_fill_viridis()
 }
 
-plot_ComplexHeatMap <- function(obj, features, metadata_cluster_colname = NULL, cluster_color_map = NULL) {
+plot_ComplexHeatMap <- function(obj, features, metadata_cluster_colname = NULL, 
+                                cap=TRUE, cluster_color_map = NULL) {
   library(ComplexHeatmap)
   library(circlize)
   library(dplyr)
@@ -56,8 +57,10 @@ plot_ComplexHeatMap <- function(obj, features, metadata_cluster_colname = NULL, 
   }
   
   # Cap extreme z-scores
-  expr_mat[expr_mat > 3]  <- 3
-  expr_mat[expr_mat < -3] <- -3
+  if (cap){
+    expr_mat[expr_mat > 3]  <- 3
+    expr_mat[expr_mat < -3] <- -3
+  }
   
   # Align metadata to columns of the matrix to guarantee matching length/order
   cell_ids <- colnames(expr_mat)
@@ -646,6 +649,242 @@ total_celltype_proportion <- function(sp.obj, assay_name = "predictions",
 is_not_empty <- function(df) {
   !is.null(df) && nrow(df) > 0
 }
+
+
+#### VOOM-LIMMA ####
+
+# Equivalence volcano for spatial Seurat (voom-limma + contrast)
+
+# - Works when the condition factor has 2 or more levels
+# - Uses explicit contrast: condition_alt - condition_ref
+# - Models within-sample correlation (block = sample_col)
+# - Classifies genes: Different_up / Different_down / Equivalent / Inconclusive
+# - Returns plot and a tidy results table
+
+equiv_volcano_voom <- function(
+    obj,
+    assay = "Spatial",
+    slot = "counts",
+    condition_col = "histology",
+    sample_col    = "sample",
+    condition_ref = "WT",
+    condition_alt = "Mut",
+    filter_to_two_levels = TRUE,
+    sesoi_delta = 0.25,
+    fdr_thr     = 0.05,
+    min_counts  = 5,
+    min_spots   = 10,
+    col_up      = "#D55E00",
+    col_down    = "#0072B2",
+    col_equiv   = "#2E8B57",
+    col_inconclusive = "gray70",
+    label_genes = NULL,
+    label_top_n = 0,
+    label_size  = 3,
+    title    = "Equivalence Volcano (voom-limma, spot-level)",
+    subtitle = NULL,
+    return_plot_only = FALSE,
+    verbose = TRUE
+) {
+  
+  library(edgeR)
+  library(limma)
+  library(scales)
+  
+  req_pkgs <- c("Seurat","edgeR","limma","dplyr","ggplot2","scales")
+  miss <- req_pkgs[!sapply(req_pkgs, requireNamespace, quietly = TRUE)]
+  if (length(miss)) stop("Missing packages: ", paste(miss, collapse=", "))
+  
+  counts <- Seurat::GetAssayData(obj, assay = assay, slot = slot)
+  md <- obj@meta.data
+  if (!all(c(condition_col, sample_col) %in% colnames(md))) {
+    stop("Missing required meta columns: '", condition_col, "' and/or '", sample_col, "'.")
+  }
+  
+  # Filter to requested levels (ALT/REF)
+  if (filter_to_two_levels) {
+    keep_mask <- md[[condition_col]] %in% c(condition_ref, condition_alt)
+    if (!any(keep_mask)) {
+      stop("No cells/spots match '", condition_ref, "' or '", condition_alt,
+           "' in column '", condition_col, "'.")
+    }
+    counts <- counts[, keep_mask, drop = FALSE]
+    md     <- md[keep_mask, , drop = FALSE]
+  }
+  
+  # Count levels AFTER filtering
+  tab_levels <- table(md[[condition_col]])
+  if (verbose) {
+    message("Post-filter counts in '", condition_col, "':")
+    print(tab_levels)
+  }
+  
+  if (!all(c(condition_ref, condition_alt) %in% names(tab_levels))) {
+    stop("After filtering, one or both requested levels are missing.\n",
+         "Have: ", paste(names(tab_levels), collapse=", "), "\n",
+         "Need both: ", condition_ref, " and ", condition_alt)
+  }
+  if (tab_levels[[condition_ref]] == 0 || tab_levels[[condition_alt]] == 0) {
+    stop("After filtering, one requested level has zero spots: ",
+         condition_ref, "=", tab_levels[[condition_ref]], ", ",
+         condition_alt, "=", tab_levels[[condition_alt]])
+  }
+  
+  # Build factors (force 2-level order: REF, ALT)
+  cond      <- factor(md[[condition_col]], levels = c(condition_ref, condition_alt))
+  sample_id <- factor(md[[sample_col]])
+  
+  # edgeR object / filtering
+  y <- edgeR::DGEList(counts = counts)
+  keep <- rowSums(y$counts >= min_counts) >= min_spots
+  y <- y[keep, , keep.lib.sizes = FALSE]
+  if (nrow(y) == 0) stop("All genes were filtered out by 'min_counts'/'min_spots'.")
+  y <- edgeR::calcNormFactors(y, method = "TMM")
+  
+  # Design with explicit columns per level
+  design <- stats::model.matrix(~ 0 + cond)
+  colnames(design) <- make.names(colnames(design))  # e.g., condmgb.bladder_Outer / condmgb.bladder_Middle
+  if (verbose) {
+    message("Design columns: ", paste(colnames(design), collapse=", "))
+  }
+  
+  alt_col <- paste0("cond", make.names(condition_alt))
+  ref_col <- paste0("cond", make.names(condition_ref))
+  if (!all(c(alt_col, ref_col) %in% colnames(design))) {
+    stop("Design is missing contrast columns.\nHave: ",
+         paste(colnames(design), collapse=", "),
+         "\nNeed: ", ref_col, " and ", alt_col)
+  }
+  
+  contr <- limma::makeContrasts(
+    contrasts = paste0(alt_col, " - ", ref_col),
+    levels    = design
+  )
+  if (verbose) {
+    message("Contrast: ", paste0(condition_alt, " - ", condition_ref))
+  }
+  
+  n_blocks <- nlevels(sample_id)
+  use_block <- n_blocks > 1
+  
+  if (use_block) {
+    if (verbose) message("Using duplicateCorrelation with ", n_blocks, " samples: ",
+                         paste(levels(sample_id), collapse=", "))
+    v0  <- limma::voom(y, design, plot = FALSE)
+    dup <- limma::duplicateCorrelation(v0, design, block = sample_id)
+    v   <- limma::voom(y, design, block = sample_id,
+                       correlation = dup$consensus, plot = FALSE)
+    fit <- limma::lmFit(v, design, block = sample_id, correlation = dup$consensus)
+  } else {
+    if (verbose) message("Only one sample after filtering (",
+                         paste(levels(sample_id), collapse=", "),
+                         "). Skipping blocking/duplicateCorrelation.")
+    dup <- list(consensus = NA_real_)
+    v   <- limma::voom(y, design, plot = FALSE)
+    fit <- limma::lmFit(v, design)
+  }
+  
+  fit <- limma::contrasts.fit(fit, contrasts = contr)
+  fit <- limma::eBayes(fit, robust = TRUE)
+  
+  tt <- limma::topTable(fit, number = Inf, sort.by = "none")
+  if (!nrow(tt)) stop("No rows returned by topTable; check inputs/contrast.")
+  
+  # CI + categories
+  z90 <- 1.64485362695147
+  df_tbl <- data.frame(tt, check.names = FALSE)
+  df_tbl$gene <- rownames(df_tbl)
+  df_tbl$SE      <- abs(df_tbl$logFC / (df_tbl$t + 1e-15))
+  df_tbl$ci_low  <- df_tbl$logFC - z90 * df_tbl$SE
+  df_tbl$ci_high <- df_tbl$logFC + z90 * df_tbl$SE
+  df_tbl$padj    <- df_tbl$adj.P.Val
+  df_tbl$neglog10padj <- -log10(df_tbl$padj + 1e-300)
+  
+  delta <- sesoi_delta
+  df_tbl$equiv <- (df_tbl$ci_low > -delta) & (df_tbl$ci_high <  delta)
+  df_tbl$diff  <- (df_tbl$padj < fdr_thr) & (abs(df_tbl$logFC) >= delta)
+  df_tbl$direction <- ifelse(df_tbl$logFC > 0, "up", "down")
+  df_tbl$category <- dplyr::case_when(
+    df_tbl$diff & df_tbl$direction == "up"   ~ "Different_up",
+    df_tbl$diff & df_tbl$direction == "down" ~ "Different_down",
+    df_tbl$equiv                             ~ "Equivalent",
+    TRUE                                     ~ "Inconclusive"
+  )
+  
+  cols <- c(
+    "Different_up"   = col_up,
+    "Different_down" = col_down,
+    "Equivalent"     = col_equiv,
+    "Inconclusive"   = col_inconclusive
+  )
+  if (is.null(subtitle)) {
+    subtitle <- sprintf("Contrast: %s − %s | SESOI = ±%.2f log2FC | FDR < %.2g | block = %s",
+                        condition_alt, condition_ref, sesoi_delta, fdr_thr, sample_col)
+  }
+  
+  gp <- ggplot2::ggplot(df_tbl, ggplot2::aes(x = logFC, y = neglog10padj, color = category)) +
+    ggplot2::geom_point(size = 1.5, alpha = 0.85) +
+    ggplot2::geom_vline(xintercept = c(-delta, delta), linetype = "dashed", color = "gray40") +
+    ggplot2::geom_hline(yintercept = -log10(fdr_thr), linetype = "dotted", color = "gray60") +
+    ggplot2::scale_color_manual(values = cols, drop = FALSE) +
+    ggplot2::labs(
+      title = title, subtitle = subtitle,
+      x = sprintf("log2 fold-change (%s − %s)", condition_alt, condition_ref),
+      y = expression(-log[10]("FDR")), color = NULL
+    ) +
+    ggplot2::theme_classic(base_size = 13)
+  
+  if (!is.null(label_genes) || label_top_n > 0) {
+    if (!requireNamespace("ggrepel", quietly = TRUE)) {
+      warning("Install 'ggrepel' to enable labeling.")
+    } else {
+      lab_df <- NULL
+      if (!is.null(label_genes)) {
+        lab_df <- dplyr::bind_rows(lab_df, dplyr::filter(df_tbl, gene %in% label_genes))
+      }
+      if (label_top_n > 0) {
+        lab_df <- dplyr::bind_rows(
+          lab_df,
+          df_tbl |>
+            dplyr::filter(category %in% c("Different_up","Different_down")) |>
+            dplyr::slice_max(order_by = abs(logFC), n = label_top_n)
+        )
+      }
+      if (!is.null(lab_df) && nrow(lab_df) > 0) {
+        lab_df <- dplyr::distinct(lab_df, gene, .keep_all = TRUE)
+        gp <- gp +
+          ggrepel::geom_text_repel(
+            data = lab_df,
+            ggplot2::aes(label = gene),
+            size = label_size,
+            box.padding = 0.3,
+            max.overlaps = Inf,
+            min.segment.length = 0,
+            segment.alpha = 0.6
+          )
+      }
+    }
+  }
+  
+  if (return_plot_only) return(gp)
+  
+  out_tbl <- df_tbl[, c("gene","logFC","SE","ci_low","ci_high","P.Value","padj",
+                        "neglog10padj","category","direction","AveExpr","B","t")]
+  rownames(out_tbl) <- NULL
+  list(
+    plot   = gp,
+    table  = out_tbl,
+    fit    = fit,
+    voom   = v,
+    dupcor = dup,
+    design = design,
+    # Also return what we contrasted for auditability
+    contrasted_levels = c(ref = condition_ref, alt = condition_alt)
+  )
+}
+
+
+
 #### GENE SET ENRICHMENT GO & KEGG ####
   library(clusterProfiler)
   library(enrichplot)
@@ -2642,6 +2881,90 @@ vlnplot_w_significance <- function(obj, gene_signature, file_name=NULL, group_by
 }
 
 #### other common utils ####
+
+### ChEA3 plotting
+barplot_chea3 <- function(data,
+                          mode = c("top_ranking", "coexp"),
+                          top_N = 10,
+                          col = "#0072B2",
+                          xmin = NULL, xmax = NULL,
+                          x_breaks = NULL, x_minor_breaks = NULL,
+                          title = NULL,
+                          base_size = 12,
+                          score_fun = NULL,
+                          x_lab = NULL,
+                          tf_col = "TF",
+                          rank_col = "Rank") {
+  mode <- match.arg(mode)
+  
+  # --- define score + x label (either by mode or user-provided overrides) ---
+  if (!is.null(score_fun)) {
+    # user provided a function: score_fun(df) -> numeric vector
+    plot_df <- data %>%
+      dplyr::mutate(.score = score_fun(.))
+    if (is.null(x_lab)) x_lab <- "Score"
+  } else {
+    if (mode == "top_ranking") {
+      plot_df <- data %>%
+        dplyr::mutate(.score = 1 - .data[["Score"]])
+      if (is.null(x_lab)) x_lab <- expression(1-("Integrated Scaled Rank"))
+    } else if (mode == "coexp") {
+      plot_df <- data %>%
+        dplyr::mutate(
+          .p = suppressWarnings(as.numeric(trimws(.data[["FET p-value"]]))),
+          .score = -log10(.p)
+        )
+      if (is.null(x_lab)) x_lab <- expression(-log[10]("FET p-value"))
+    }
+  }
+  
+  # --- common cleaning / selection ---
+  plot_df <- plot_df %>%
+    dplyr::filter(is.finite(.score)) %>%
+    dplyr::arrange(.data[[rank_col]]) %>%
+    dplyr::slice_head(n = top_N)
+  
+  if (nrow(plot_df) == 0) {
+    stop("No plottable rows after computing score. Check required columns and numeric parsing.")
+  }
+  
+  # --- x-range defaults ---
+  xr_min <- if (is.null(xmin)) min(plot_df$.score, na.rm = TRUE) else xmin
+  xr_max <- if (is.null(xmax)) max(plot_df$.score, na.rm = TRUE) else xmax
+  
+  # --- breaks ---
+  if (is.null(x_breaks)) x_breaks <- pretty(c(xr_min, xr_max), n = 5)
+  if (is.null(x_minor_breaks) && length(x_breaks) >= 2) {
+    x_minor_breaks <- head(x_breaks, -1) + diff(x_breaks) / 2
+  }
+  
+  # --- plot ---
+  ggplot2::ggplot(
+    plot_df,
+    ggplot2::aes(
+      x = .score,
+      y = stats::reorder(.data[[tf_col]], .score)
+    )
+  ) +
+    ggplot2::geom_col(fill = col, width = 0.7) +
+    ggplot2::theme_classic(base_size = base_size) +
+    ggplot2::theme(
+      axis.text.x = ggplot2::element_text(colour = "black", size = 14),
+      axis.line = ggplot2::element_line(linewidth = 0.6, colour = "black"),
+      axis.ticks = ggplot2::element_line(linewidth = 0.5, colour = "black"),
+      axis.ticks.length = grid::unit(3, "pt"),
+      plot.title = ggplot2::element_text(hjust = 0.5, face = "bold"),
+      panel.border = ggplot2::element_blank()
+    ) +
+    ggplot2::labs(title = title, x = x_lab, y = NULL) +
+    ggplot2::scale_x_continuous(
+      breaks = x_breaks,
+      minor_breaks = x_minor_breaks,
+      expand = ggplot2::expansion(mult = c(0, 0.02))
+    ) +
+    ggplot2::coord_cartesian(xlim = c(xr_min, xr_max))
+}
+
 
 # from Human to Mouse
 convertHumanGeneList <- function(x){
