@@ -4,6 +4,119 @@
 source("~/research/coding/BakerLab/NGS_utils/Transcriptomics/RNASeqUtils.R")
 ####Seurat Visium####
 
+inspect_cell_spots <- function(
+    obj,
+    explore = TRUE,
+    slice = NULL,
+    xcut = NULL,
+    ycut = NULL,
+    xdir = ">",
+    ydir = "<",
+    logical = c("OR", "AND"),
+    pt.size.factor = 2,
+    img.alpha = 0.7,
+    point_cex_bg = 1.0,
+    point_cex_sel = 1.4,
+    show_guides = TRUE,
+    return_df = FALSE
+) {
+  stopifnot(inherits(obj, "Seurat"))
+  logical <- match.arg(logical)
+  
+  if (is.null(slice)) {
+    slice <- names(obj@images)[1]
+    if (is.null(slice) || length(slice) == 0) stop("No images found in obj@images.")
+  }
+  if (!slice %in% names(obj@images)) stop("Slice not found: ", slice)
+  
+  img <- obj@images[[slice]]
+  
+  coords <- as.data.frame(img@boundaries$centroids@coords)
+  if (!all(c("x", "y") %in% colnames(coords))) {
+    if (ncol(coords) >= 2) colnames(coords)[1:2] <- c("x", "y")
+    else stop("Could not infer x/y columns from centroid coords.")
+  }
+  coords$barcode <- Seurat::Cells(img)
+  
+  message(
+    "Slice: ", slice, "\n",
+    "n spots: ", nrow(coords), "\n",
+    "x range: [", round(min(coords$x, na.rm=TRUE)), ", ", round(max(coords$x, na.rm=TRUE)), "]\n",
+    "y range: [", round(min(coords$y, na.rm=TRUE)), ", ", round(max(coords$y, na.rm=TRUE)), "]\n",
+    "x quantiles (5/50/95%): ",
+    paste(round(stats::quantile(coords$x, c(0.05, 0.5, 0.95), na.rm=TRUE)), collapse=", "), "\n",
+    "y quantiles (5/50/95%): ",
+    paste(round(stats::quantile(coords$y, c(0.05, 0.5, 0.95), na.rm=TRUE)), collapse=", ")
+  )
+  
+  draw_scatter <- function(sel_coords = NULL, main = "Centroids") {
+    plot(coords$x, coords$y, pch = 16, cex = point_cex_bg,
+         xlab = "x (image px)", ylab = "y (image px)", main = main)
+    if (!is.null(sel_coords) && nrow(sel_coords) > 0) {
+      points(sel_coords$x, sel_coords$y, col = "red", pch = 16, cex = point_cex_sel)
+      if (show_guides) {
+        if (!is.null(xcut)) abline(v = xcut, lty = 2)
+        if (!is.null(ycut)) abline(h = ycut, lty = 2)
+      }
+    }
+  }
+  
+  # Set layout and ensure it resets
+  par(mfrow = c(1, 2), mar = c(4, 4, 3, 1))
+  on.exit(par(mfrow = c(1, 1)), add = TRUE)
+  
+  if (isTRUE(explore)) {
+    p_spatial <- Seurat::SpatialDimPlot(
+      obj, images = slice,
+      pt.size.factor = pt.size.factor,
+      image.alpha = img.alpha
+    ) + ggplot2::ggtitle(paste0("Spatial (", slice, ")"))
+    
+    print(p_spatial)
+    draw_scatter(main = "Centroids")
+    
+    return(invisible(coords))
+  }
+  
+  if (is.null(xcut) && is.null(ycut)) stop("Provide at least one of xcut or ycut when explore=FALSE.")
+  
+  x_rule <- rep(TRUE, nrow(coords))
+  y_rule <- rep(TRUE, nrow(coords))
+  
+  if (!is.null(xcut)) {
+    x_rule <- if (xdir == ">") coords$x > xcut else coords$x < xcut
+  }
+  if (!is.null(ycut)) {
+    y_rule <- if (ydir == ">") coords$y > ycut else coords$y < ycut
+  }
+  
+  sel <- if (!is.null(xcut) && !is.null(ycut)) {
+    if (logical == "AND") (x_rule & y_rule) else (x_rule | y_rule)
+  } else if (!is.null(xcut)) {
+    x_rule
+  } else {
+    y_rule
+  }
+  
+  sel_coords <- coords[sel, , drop = FALSE]
+  sel_barcodes <- sel_coords$barcode
+  
+  p_spatial <- Seurat::SpatialDimPlot(
+    obj, images = slice,
+    cells.highlight = list(sel_barcodes),
+    cols.highlight = c("grey80", "red"),
+    pt.size.factor = pt.size.factor,
+    image.alpha = img.alpha
+  ) + ggplot2::ggtitle(paste0("Spatial highlight (", slice, ")"))
+  
+  print(p_spatial)
+  draw_scatter(sel_coords, main = paste0("Centroids + selection (", logical, ")"))
+  
+  if (return_df) return(sel_coords)
+  return(as.list(sel_barcodes))
+}
+
+
 plot_average_exp_HeatMap <- function(obj, cluster_colname){
   
   n = length(levels(obj[[cluster_colname]][[cluster_colname]]))
@@ -180,7 +293,7 @@ getNwriteDEG_df <- function(markers, path=NULL, file_name=NULL, FDR=F, pcut=1e-2
     print(paste0("Filtering by adjusted pval cutoff: ", pcut))
     print(paste0("and average log2FC cutoff: ", FCcut))
   }
-
+  
   if (rankbyPctDiff){
     ge <- arrange(ge, desc(pct.diff))
   }
@@ -277,99 +390,99 @@ getDEA_plotVP <- function(object, setIdent=NULL, ident1=NULL, ident2=NULL,
   # p-val adjustment and rest of plotting code...
   markers$p_val_adj_fdr <- p.adjust(markers$p_val, method='fdr')
   markers <- markers %>% as.data.frame() %>% rownames_to_column("gene")
-
-    keyvals <- rep(deg_col[3], nrow(markers))  # Default color
-
-    if (plotFDR){
-      y = "p_val_adj_fdr"
-      dir.create(file.path(filepath, "FDR"), recursive = TRUE)
-      filepath <- file.path(filepath, "FDR")
-      filename = paste0(filename, "_FDR")
-      keyvals[markers$avg_log2FC > FCcutoff &
-                markers$p_val_adj_fdr < pcutoff] <- deg_col[1]
-      keyvals[markers$avg_log2FC < -FCcutoff &
-                markers$p_val_adj_fdr < pcutoff] <- deg_col[2]
-
-      getNwriteDEG_df(markers, path=filepath, FDR=T, file_name=filename,
-                      pcut=pcutoff, FCcut=FCcutoff,
-                      rankbyFC=F,rankbyPval=T,
-                      rankbyAdjPval=F,rankbyPctDiff=F)
-
-    }else{
-      y = "p_val_adj"
-      dir.create(file.path(filepath, "noFDR"), recursive = TRUE)
-      filepath <- file.path(filepath, "noFDR")
-      filename = paste0(filename, "_noFDR")
-      keyvals[markers$avg_log2FC > FCcutoff &
-                markers$p_val_adj < pcutoff] <- deg_col[1]
-      keyvals[markers$avg_log2FC < -FCcutoff &
-                markers$p_val_adj < pcutoff] <- deg_col[2]
-      getNwriteDEG_df(markers, path=filepath, FDR=F, file_name=filename,
-                      pcut=pcutoff, FCcut=FCcutoff,
-                      rankbyFC=F,rankbyPval=T,
-                      rankbyAdjPval=F,rankbyPctDiff=F)
-    }
-
-    suptitle = paste0("The dotted lines indicate","\n",
-                      "Pval cutoff: ", pcutoff, "\n",
-                      "FoldChange cutoff: ", FCcutoff)
-
-
-    keyvals[is.na(keyvals)] <- deg_col[3]
-    names(keyvals)[keyvals == deg_col[2]] <- paste0("Down-regulated","\n", ident2)
-    names(keyvals)[keyvals == deg_col[1]] <- paste0("Up-regulated", "\n", ident1)
-    names(keyvals)[keyvals == deg_col[3]] <- "NS"
-
-    if (is.null(markGenes)){
-      p <- EnhancedVolcano(markers,
-                           lab=markers$gene,
-                           title = filename,
-                           subtitle = suptitle,
-                           x='avg_log2FC',
-                           y=y, FCcutoff = FCcutoff,
-                           ylab = bquote('-'~Log[10]~ 'adjusted p_value'),
-                           pCutoffCol = y,
-                           pCutoff = pcutoff,
-                           xlab = bquote('Average' ~Log[2]~ 'fold change'),
-                           labSize = 4.0,
-                           pointSize = 4,
-                           colAlpha = 0.8,
-                           legendLabSize = 12,
-                           legendIconSize = 2.0,
-                           widthConnectors = 0.75,
-                           drawConnectors = connectors, arrowheads = F,
-                           max.overlaps=10, colCustom = keyvals)
-    }else{
-      p <- EnhancedVolcano(markers, lab=markers$gene,
-                           selectLab=markGenes,
-                           title = filename,
-                           subtitle = suptitle,
-                           x='avg_log2FC',
-                           y=y, FCcutoff = FCcutoff,
-                           ylab = bquote('-'~Log[10]~ 'adjusted p_value'),
-                           pCutoffCol = y,
-                           pCutoff = pcutoff,
-                           xlab = bquote('Average' ~Log[2]~ 'fold change'),
-                           labSize = 4.0,
-                           pointSize = 4,
-                           colAlpha = 0.8,
-                           legendLabSize = 12,
-                           legendIconSize = 2.0,
-                           widthConnectors = 0.75,
-                           drawConnectors = connectors, arrowheads = F,
-                           max.overlaps=10, colCustom = keyvals)
-    }
-    save_it(p, filepath, paste0("VP-", filename, "_pcut-", pcutoff,"_FCcut-", FCcutoff),
-            format = "png", resolution=300, w=1200, h=1200)
-    return(markers)
+  
+  keyvals <- rep(deg_col[3], nrow(markers))  # Default color
+  
+  if (plotFDR){
+    y = "p_val_adj_fdr"
+    dir.create(file.path(filepath, "FDR"), recursive = TRUE)
+    filepath <- file.path(filepath, "FDR")
+    filename = paste0(filename, "_FDR")
+    keyvals[markers$avg_log2FC > FCcutoff &
+              markers$p_val_adj_fdr < pcutoff] <- deg_col[1]
+    keyvals[markers$avg_log2FC < -FCcutoff &
+              markers$p_val_adj_fdr < pcutoff] <- deg_col[2]
+    
+    getNwriteDEG_df(markers, path=filepath, FDR=T, file_name=filename,
+                    pcut=pcutoff, FCcut=FCcutoff,
+                    rankbyFC=F,rankbyPval=T,
+                    rankbyAdjPval=F,rankbyPctDiff=F)
+    
+  }else{
+    y = "p_val_adj"
+    dir.create(file.path(filepath, "noFDR"), recursive = TRUE)
+    filepath <- file.path(filepath, "noFDR")
+    filename = paste0(filename, "_noFDR")
+    keyvals[markers$avg_log2FC > FCcutoff &
+              markers$p_val_adj < pcutoff] <- deg_col[1]
+    keyvals[markers$avg_log2FC < -FCcutoff &
+              markers$p_val_adj < pcutoff] <- deg_col[2]
+    getNwriteDEG_df(markers, path=filepath, FDR=F, file_name=filename,
+                    pcut=pcutoff, FCcut=FCcutoff,
+                    rankbyFC=F,rankbyPval=T,
+                    rankbyAdjPval=F,rankbyPctDiff=F)
   }
+  
+  suptitle = paste0("The dotted lines indicate","\n",
+                    "Pval cutoff: ", pcutoff, "\n",
+                    "FoldChange cutoff: ", FCcutoff)
+  
+  
+  keyvals[is.na(keyvals)] <- deg_col[3]
+  names(keyvals)[keyvals == deg_col[2]] <- paste0("Down-regulated","\n", ident2)
+  names(keyvals)[keyvals == deg_col[1]] <- paste0("Up-regulated", "\n", ident1)
+  names(keyvals)[keyvals == deg_col[3]] <- "NS"
+  
+  if (is.null(markGenes)){
+    p <- EnhancedVolcano(markers,
+                         lab=markers$gene,
+                         title = filename,
+                         subtitle = suptitle,
+                         x='avg_log2FC',
+                         y=y, FCcutoff = FCcutoff,
+                         ylab = bquote('-'~Log[10]~ 'adjusted p_value'),
+                         pCutoffCol = y,
+                         pCutoff = pcutoff,
+                         xlab = bquote('Average' ~Log[2]~ 'fold change'),
+                         labSize = 4.0,
+                         pointSize = 4,
+                         colAlpha = 0.8,
+                         legendLabSize = 12,
+                         legendIconSize = 2.0,
+                         widthConnectors = 0.75,
+                         drawConnectors = connectors, arrowheads = F,
+                         max.overlaps=10, colCustom = keyvals)
+  }else{
+    p <- EnhancedVolcano(markers, lab=markers$gene,
+                         selectLab=markGenes,
+                         title = filename,
+                         subtitle = suptitle,
+                         x='avg_log2FC',
+                         y=y, FCcutoff = FCcutoff,
+                         ylab = bquote('-'~Log[10]~ 'adjusted p_value'),
+                         pCutoffCol = y,
+                         pCutoff = pcutoff,
+                         xlab = bquote('Average' ~Log[2]~ 'fold change'),
+                         labSize = 4.0,
+                         pointSize = 4,
+                         colAlpha = 0.8,
+                         legendLabSize = 12,
+                         legendIconSize = 2.0,
+                         widthConnectors = 0.75,
+                         drawConnectors = connectors, arrowheads = F,
+                         max.overlaps=10, colCustom = keyvals)
+  }
+  save_it(p, filepath, paste0("VP-", filename, "_pcut-", pcutoff,"_FCcut-", FCcutoff),
+          format = "png", resolution=300, w=1200, h=1200)
+  return(markers)
+}
 
 # Function to exclude reads from cells with given UMIs > 1000
 remove_contaminated_spots <- function(obj, genes2check, umi_count_cutoff=1000){
   
   obj$UMI_counts <- Matrix::colSums(GetAssayData(obj, 
-                                                     assay = "Spatial", 
-                                                     layer = "counts")[genes2check, , drop = FALSE])
+                                                 assay = "Spatial", 
+                                                 layer = "counts")[genes2check, , drop = FALSE])
   # Remove cells/spots with > 1000 UMIs of given genes
   obj <- subset(obj, subset = UMI_counts <= umi_count_cutoff)
   return(obj)
@@ -886,9 +999,9 @@ equiv_volcano_voom <- function(
 
 
 #### GENE SET ENRICHMENT GO & KEGG ####
-  library(clusterProfiler)
-  library(enrichplot)
-  library(org.Mm.eg.db)
+library(clusterProfiler)
+library(enrichplot)
+library(org.Mm.eg.db)
 check_for_empty_enrichment <- function(enrichment_results) {
   if (length(enrichment_results) == 0 || nrow(enrichment_results) == 0) {
     message("No enrichment results found. Skipping this step.")
@@ -1004,10 +1117,10 @@ run_GO_enrichment <- function(geneid.ls, ont, pvalueCutoff = 0.05, numCategory =
   
   # Calculate Rich factor
   enrichment_results@result = mutate(enrichment_results@result, 
-                       richFactor = Count/as.numeric(sub("/\\d+", "", BgRatio)))
+                                     richFactor = Count/as.numeric(sub("/\\d+", "", BgRatio)))
   
   g <- enrichplot::dotplot(enrichment_results, showCategory = numCategory,
-               title = paste0(filename, "-GO Enrichment Analysis"))
+                           title = paste0(filename, "-GO Enrichment Analysis"))
   
   save_it(g, outpath, paste0(filename, "-enrichGO"),
           format = "png", resolution = 300, w = 800, h = 1000)
@@ -1072,37 +1185,37 @@ run_GO_KEGGenrichment <- function(dea_markers, pcut = 1e-2, FCcut = 1, numCatego
                                         numCategory = numCategory, 
                                         paste0("ALL_DOWN_",filename), 
                                         savepath)
-
+  
   results$BP_up <- run_GO_enrichment(geneid.ls$upregulated, 
                                      ont="BP", pvalueCutoff = pcut,
                                      numCategory = numCategory, 
                                      paste0("BP_UP_",filename), 
                                      savepath)
-
+  
   results$BP_down <- run_GO_enrichment(geneid.ls$downregulated, 
                                        ont="BP", pvalueCutoff = pcut,
                                        numCategory = numCategory, 
                                        paste0("BP_DOWN_",filename), 
                                        savepath)
-
+  
   results$CC_up <- run_GO_enrichment(geneid.ls$upregulated, 
                                      ont="CC", pvalueCutoff = pcut,
                                      numCategory = numCategory, 
                                      paste0("CC_UP_",filename), 
                                      savepath)
-
+  
   results$CC_down <- run_GO_enrichment(geneid.ls$downregulated, 
                                        ont="CC", pvalueCutoff = pcut,
                                        numCategory = numCategory, 
                                        paste0("CC_DOWN_",filename),
                                        savepath)
-
+  
   results$MF_up <- run_GO_enrichment(geneid.ls$upregulated, 
                                      ont="MF", pvalueCutoff = pcut,
                                      numCategory = numCategory, 
                                      paste0("MF_UP_",filename), 
                                      savepath)
-
+  
   results$MF_down <- run_GO_enrichment(geneid.ls$downregulated, 
                                        ont="MF", pvalueCutoff = pcut,
                                        numCategory = numCategory, 
@@ -1203,104 +1316,104 @@ run_integration_analysis <- function(obj, integration, result_path, res = 2, fcu
   library(patchwork)
   library(ComplexHeatmap)
   library(EnhancedVolcano)
+  
+  # ---- Step 1: Integration and Clustering ----
+  obj <- FindNeighbors(obj, reduction = integration, dims = 1:30)
+  obj <- FindClusters(obj, resolution = res, cluster.name = paste0(integration, "_clusters"))
+  obj <- RunUMAP(obj, dims = 1:30, reduction = integration, reduction.name = paste0("umap.", integration))
+  obj <- RunTSNE(obj, dims = 1:30, reduction = integration, reduction.name = paste0("tsne.", integration))
+  obj <- JoinLayers(obj)
+  
+  # ---- Step 2: Define Colors ----
+  if (!is.null(cols)){
+    color.use <- cols 
+    names(color.use) <- levels(obj)
+  }else{
+    color.use=NULL
+  }
+  
+  # ---- Step 3: Dimensionality Reduction Plots ----
+  p1 <- DimPlot(obj, reduction = paste0("umap.", integration), group.by = paste0(integration, "_clusters"),
+                combine = FALSE, label.size = 2, cols = color.use)
+  p2 <- SpatialDimPlot(obj, pt.size.factor = 10, group.by = paste0(integration, "_clusters"),
+                       combine = FALSE, label.size = 2, cols = color.use)
+  
+  wrapped_plot <- wrap_plots(c(p1, p2), ncol = 2, byrow = FALSE)
+  
+  # ---- Step 4: Create Directory for Results ----
+  integration_save_path <- file.path(result_path, paste0(integration))
+  dir.create(integration_save_path, recursive = TRUE)
+  
+  # Save wrapped plot
+  save_it(wrapped_plot, integration_save_path, paste0(integration, "_res", res, "_UMAP_Spatial"), 
+          format = "png", resolution = 300, w = 3000, h = 5000)
+  
+  # ---- Step 5: Identify Cluster Markers ----
+  markers <- FindAllMarkers(obj) %>%
+    mutate(pct.diff = pct.1 - pct.2) %>%
+    group_by(cluster)
+  
+  # ---- Step 6: Extract and Print Top 5 Markers per Cluster ----
+  top5 <- markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(abs(avg_log2FC) > 1 & p_val_adj < 0.05) %>%
+    slice_head(n = 5) %>%
+    ungroup()
+  
+  print(top5)  # Print top 5 markers in the console
+  
+  # Save top 5 markers as CSV
+  write.csv(top5, file = file.path(integration_save_path, paste0(integration, "_res", res, "_Top5Markers.csv")))
+  
+  # ---- Step 7: Plot Complex Heatmap ----
+  hm <- plot_ComplexHeatMap(obj, markers = top5, metadata_cluster_colname = paste0(integration, "_clusters"))
+  save_it(hm, integration_save_path, paste0(integration, "_res", res,"_HeatMap"), 
+          format = "png", resolution = 300, w = 3000, h = 5000)
+  
+  # ---- Step 8: Volcano Plots and DEG Export ----
+  clusters <- unique(markers$cluster)
+  
+  for (i in clusters) {
+    dea_clus <- markers[markers$cluster == i, ]
+    suptitle <- paste0("Cluster ", i, " vs Others")
     
-    # ---- Step 1: Integration and Clustering ----
-    obj <- FindNeighbors(obj, reduction = integration, dims = 1:30)
-    obj <- FindClusters(obj, resolution = res, cluster.name = paste0(integration, "_clusters"))
-    obj <- RunUMAP(obj, dims = 1:30, reduction = integration, reduction.name = paste0("umap.", integration))
-    obj <- RunTSNE(obj, dims = 1:30, reduction = integration, reduction.name = paste0("tsne.", integration))
-    obj <- JoinLayers(obj)
+    p <- EnhancedVolcano(
+      dea_clus,
+      lab = dea_clus$gene,
+      title = "Integrated Bladders",
+      subtitle = suptitle,
+      x = 'avg_log2FC',
+      y = 'p_val_adj',
+      FCcutoff = fcut,
+      ylab = "p_val_adj",
+      pCutoffCol = 'p_val_adj',
+      pCutoff = pcut,
+      xlab = bquote('Average' ~ Log[2] ~ 'fold change'),
+      labSize = 5.0,
+      pointSize = 3,
+      colAlpha = 0.8,
+      legendLabSize = 12,
+      legendIconSize = 2.0,
+      widthConnectors = 0.75,
+      gridlines.major = FALSE,
+      gridlines.minor = FALSE,
+      drawConnectors = TRUE,
+      max.overlaps = 20
+    )
     
-    # ---- Step 2: Define Colors ----
-    if (!is.null(cols)){
-      color.use <- cols 
-      names(color.use) <- levels(obj)
-    }else{
-      color.use=NULL
-    }
-    
-    # ---- Step 3: Dimensionality Reduction Plots ----
-    p1 <- DimPlot(obj, reduction = paste0("umap.", integration), group.by = paste0(integration, "_clusters"),
-                  combine = FALSE, label.size = 2, cols = color.use)
-    p2 <- SpatialDimPlot(obj, pt.size.factor = 10, group.by = paste0(integration, "_clusters"),
-                         combine = FALSE, label.size = 2, cols = color.use)
-    
-    wrapped_plot <- wrap_plots(c(p1, p2), ncol = 2, byrow = FALSE)
-    
-    # ---- Step 4: Create Directory for Results ----
-    integration_save_path <- file.path(result_path, paste0(integration))
-    dir.create(integration_save_path, recursive = TRUE)
-    
-    # Save wrapped plot
-    save_it(wrapped_plot, integration_save_path, paste0(integration, "_res", res, "_UMAP_Spatial"), 
+    save_it(p, integration_save_path, paste0(integration, "_res", res, "_Cluster", i, "vsOthers"), 
             format = "png", resolution = 300, w = 3000, h = 5000)
-
-    # ---- Step 5: Identify Cluster Markers ----
-    markers <- FindAllMarkers(obj) %>%
-      mutate(pct.diff = pct.1 - pct.2) %>%
-      group_by(cluster)
     
-    # ---- Step 6: Extract and Print Top 5 Markers per Cluster ----
-    top5 <- markers %>%
-      group_by(cluster) %>%
-      dplyr::filter(abs(avg_log2FC) > 1 & p_val_adj < 0.05) %>%
-      slice_head(n = 5) %>%
-      ungroup()
+    # ---- Step 9: Filter DEGs and Save CSV ----
+    filtered_dea <- markers %>%
+      filter(avg_log2FC > 1, p_val_adj < 1e-2, cluster == i)
     
-    print(top5)  # Print top 5 markers in the console
-    
-    # Save top 5 markers as CSV
-    write.csv(top5, file = file.path(integration_save_path, paste0(integration, "_res", res, "_Top5Markers.csv")))
-    
-    # ---- Step 7: Plot Complex Heatmap ----
-    hm <- plot_ComplexHeatMap(obj, markers = top5, metadata_cluster_colname = paste0(integration, "_clusters"))
-    save_it(hm, integration_save_path, paste0(integration, "_res", res,"_HeatMap"), 
-            format = "png", resolution = 300, w = 3000, h = 5000)
-    
-    # ---- Step 8: Volcano Plots and DEG Export ----
-    clusters <- unique(markers$cluster)
-    
-    for (i in clusters) {
-      dea_clus <- markers[markers$cluster == i, ]
-      suptitle <- paste0("Cluster ", i, " vs Others")
-      
-      p <- EnhancedVolcano(
-        dea_clus,
-        lab = dea_clus$gene,
-        title = "Integrated Bladders",
-        subtitle = suptitle,
-        x = 'avg_log2FC',
-        y = 'p_val_adj',
-        FCcutoff = fcut,
-        ylab = "p_val_adj",
-        pCutoffCol = 'p_val_adj',
-        pCutoff = pcut,
-        xlab = bquote('Average' ~ Log[2] ~ 'fold change'),
-        labSize = 5.0,
-        pointSize = 3,
-        colAlpha = 0.8,
-        legendLabSize = 12,
-        legendIconSize = 2.0,
-        widthConnectors = 0.75,
-        gridlines.major = FALSE,
-        gridlines.minor = FALSE,
-        drawConnectors = TRUE,
-        max.overlaps = 20
-      )
-      
-      save_it(p, integration_save_path, paste0(integration, "_res", res, "_Cluster", i, "vsOthers"), 
-              format = "png", resolution = 300, w = 3000, h = 5000)
-      
-      # ---- Step 9: Filter DEGs and Save CSV ----
-      filtered_dea <- markers %>%
-        filter(avg_log2FC > 1, p_val_adj < 1e-2, cluster == i)
-      
-      write.csv(
-        x = filtered_dea,
-        file = file.path(integration_save_path, 
-                         paste0("Filtered_", integration, "_res", res, "_Cluster", i, "vsOthers", "_DEG.csv"))
-      )
-    }
+    write.csv(
+      x = filtered_dea,
+      file = file.path(integration_save_path, 
+                       paste0("Filtered_", integration, "_res", res, "_Cluster", i, "vsOthers", "_DEG.csv"))
+    )
+  }
   return(obj)
 }
 
@@ -2957,14 +3070,13 @@ barplot_chea3 <- function(data,
       panel.border = ggplot2::element_blank()
     ) +
     ggplot2::labs(title = title, x = x_lab, y = NULL) +
-    ggplot2::scale_x_continuous(
-      breaks = x_breaks,
-      minor_breaks = x_minor_breaks,
-      expand = ggplot2::expansion(mult = c(0, 0.02))
-    ) +
+  ggplot2::scale_x_continuous(
+    breaks = x_breaks,
+    minor_breaks = x_minor_breaks,
+    expand = ggplot2::expansion(mult = c(0, 0.02))
+  ) +
     ggplot2::coord_cartesian(xlim = c(xr_min, xr_max))
 }
-
 
 # from Human to Mouse
 convertHumanGeneList <- function(x){
@@ -2985,9 +3097,9 @@ convertHumanGeneList <- function(x){
 
 convert_genes <- function(gene_list, species = "human_to_mouse") {
   # Load the biomaRt package
-
+  
   library(biomaRt)
-
+  
   # Initialize biomaRt for human and mouse gene conversion
   ensembl_human <- useEnsembl("ensembl","hsapiens_gene_ensembl", mirror = "useast", host = "www.ensembl.org")
   ensembl_mouse <- useEnsembl("ensembl","mmusculus_gene_ensembl", mirror = "useast", host = "www.ensembl.org")
@@ -3055,5 +3167,3 @@ df2longdf <- function(df){
   df <- df %>% gather(key='sample', value='value', -gene)
   return(df)
 }
-
-
