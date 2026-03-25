@@ -763,6 +763,209 @@ is_not_empty <- function(df) {
   !is.null(df) && nrow(df) > 0
 }
 
+#### HALLMARK Pathway activity analysis (Visium) ####
+library(msigdbr)
+library(GSVA)
+library(lme4)
+
+get_msigdb_sets_mouse <- function(category = "H",
+                                  subcategory = NULL,
+                                  min_size = 10) {
+  if (is.null(subcategory)) {
+    gs_df <- msigdbr(species = "Mus musculus", category = category)
+  } else {
+    gs_df <- msigdbr(species = "Mus musculus",
+                     category = category,
+                     subcategory = subcategory)
+  }
+  
+  gs_df <- gs_df %>%
+    dplyr::select(gs_name, gene_symbol) %>%
+    dplyr::distinct()
+  
+  pathways <- split(gs_df$gene_symbol, gs_df$gs_name)
+  
+  list(
+    pathways = pathways,
+    min_size = min_size
+  )
+}
+
+# ssGSEA scorer (GSVA)
+run_ssgsea <- function(expr_mat, pathways, min_size = 10) {
+  # Intersect gene sets with matrix genes
+  pathways_filt <- lapply(pathways, function(g) intersect(g, rownames(expr_mat)))
+  pathways_filt <- pathways_filt[lengths(pathways_filt) >= min_size]
+  
+  scores <- GSVA::gsva(
+    expr = as.matrix(expr_mat),
+    gset.idx.list = pathways_filt,
+    method = "ssgsea",
+    kcdf = "Gaussian",
+    abs.ranking = TRUE
+  )
+  
+  # Return: spot x pathway
+  scores_df <- as.data.frame(t(scores))
+  scores_df$barcode <- rownames(scores_df)
+  
+  list(scores = scores_df, pathways_filt = pathways_filt)
+}
+
+# Lets attach pathway scores to Seurat metadata
+attach_scores_to_meta <- function(seurat_obj, scores_df) {
+  meta <- seurat_obj@meta.data
+  meta$barcode <- rownames(meta)
+  
+  meta2 <- left_join(meta, scores_df, by = "barcode")
+  meta2
+}
+
+# Mixed-model runner across all pathways
+# NOTE: caveat now here is, I am only thinking that we have one non-reference to compare
+# so we need to modify if we have more than one non-reference samples
+fit_pathways_lmer <- function(
+    df,
+    pathway_cols,
+    response_col = NULL,         # not used; pathway_cols are responses
+    group_col,                   # e.g. "histology" or "celltype_res.0.8"
+    group_ref,                   # e.g. "wt.bladder"
+    sample_col,                  # e.g. "sample"
+    covariates = NULL,           # e.g. c("SMC_score","ECM_score")
+    interaction_with = NULL      # e.g. "SMC_score" (adds group:SMC_score)
+) {
+  # Ensure factors with correct reference
+  df <- df %>%
+    mutate(
+      .group = factor(.data[[group_col]], levels = c(group_ref, setdiff(unique(.data[[group_col]]), group_ref))),
+      .sample = factor(.data[[sample_col]])
+    )
+  
+  # Build fixed effects string
+  fixed_terms <- c(".group")
+  if (!is.null(covariates)) fixed_terms <- c(fixed_terms, covariates)
+  fixed_str <- paste(fixed_terms, collapse = " + ")
+  
+  # Interaction term (optional)
+  if (!is.null(interaction_with)) {
+    fixed_str <- paste0(fixed_str, " + .group:", interaction_with)
+  }
+  
+  # Full formula template: y ~ fixed + (1|sample)
+  # We will substitute y per pathway.
+  results <- lapply(pathway_cols, function(pw) {
+    cols_needed <- c(pw, group_col, sample_col, covariates, interaction_with)
+    cols_needed <- cols_needed[!is.na(cols_needed)]
+    
+    d <- df %>% select(all_of(cols_needed), .group, .sample) %>% drop_na()
+    if (nrow(d) < 10) return(NULL)
+    
+    fml <- as.formula(paste0("`", pw, "` ~ ", fixed_str, " + (1|.sample)"))
+    m <- lmer(fml, data = d, REML = FALSE)
+    sing <- lme4::isSingular(m, tol = 1e-4)
+    
+    co <- summary(m)$coefficients
+    
+    # Main effect row name for group: ".group<Level>" where Level is the non-reference level
+    # If there are exactly 2 groups, this is ".group<second level>"
+    if (nlevels(d$.group) != 2) {
+      stop("fit_pathways_lmer currently supports exactly 2 group levels.")
+    }
+    
+    other_levels <- levels(d$.group)[-1]
+    if (length(other_levels) < 1) return(NULL)
+    
+    main_row <- paste0(".group", other_levels[1])
+    if (!main_row %in% rownames(co)) return(NULL)
+    
+    out <- data.frame(
+      pathway = pw,
+      singular = sing,
+      beta = co[main_row, "Estimate"],
+      se   = co[main_row, "Std. Error"],
+      t    = co[main_row, "t value"],
+      stringsAsFactors = FALSE
+    )
+    
+    # Approximate two-sided p-value from t (same spirit as your earlier code)
+    df_approx <- max(nrow(d) - length(fixed_terms) - 1, 1)
+    out$p <- 2 * pt(abs(out$t), df = df_approx, lower.tail = FALSE)
+    
+    # Optional interaction row
+    if (!is.null(interaction_with)) {
+      int_row <- paste0(main_row, ":", interaction_with)
+      if (int_row %in% rownames(co)) {
+        out$beta_interaction <- co[int_row, "Estimate"]
+        out$se_interaction   <- co[int_row, "Std. Error"]
+        out$t_interaction    <- co[int_row, "t value"]
+        out$p_interaction    <- 2 * pt(abs(out$t_interaction), df = df_approx, lower.tail = FALSE)
+      } else {
+        out$beta_interaction <- NA
+        out$se_interaction <- NA
+        out$t_interaction <- NA
+        out$p_interaction <- NA
+      }
+    }
+    
+    out
+  })
+  
+  res <- bind_rows(results)
+  res$p_adj <- p.adjust(res$p, method = "BH")
+  res <- res %>% arrange(p_adj)
+  
+  res
+}
+
+# running the athway contrast
+run_pathway_contrast <- function(
+    seurat_obj,
+    subset_expr,
+    group_col,
+    group_ref,
+    sample_col = "sample",
+    covariates = NULL,
+    interaction_with = NULL,
+    assay = "Spatial",
+    slot = "data",
+    min_size = 10,
+    msig_category = "H",
+    msig_subcategory = NULL
+) {
+  cells_use <- WhichCells(seurat_obj, expression = !!subset_expr)
+  obj <- subset(seurat_obj, cells = cells_use)
+  
+  gs_info <- get_msigdb_sets_mouse(
+    category = msig_category,
+    subcategory = msig_subcategory,
+    min_size = min_size
+  )
+  
+  expr <- GetAssayData(obj, assay = assay, slot = slot)
+  
+  ssg <- run_ssgsea(expr, gs_info$pathways, min_size = gs_info$min_size)
+  meta <- attach_scores_to_meta(obj, ssg$scores)
+  
+  pathway_cols <- setdiff(colnames(ssg$scores), "barcode")
+  
+  res <- fit_pathways_lmer(
+    df = meta,
+    pathway_cols = pathway_cols,
+    group_col = group_col,
+    group_ref = group_ref,
+    sample_col = sample_col,
+    covariates = covariates,
+    interaction_with = interaction_with
+  )
+  
+  list(
+    obj = obj,
+    meta = meta,
+    pathways_used = ssg$pathways_filt,
+    res = res
+  )
+}
+
 
 #### VOOM-LIMMA ####
 
